@@ -1,4 +1,4 @@
-name: Android CI (AIDE-Termux Fix)
+name: Android CI (Package Fix)
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Match Package Name & Fix Code
+    - name: Match Package Name & Fix Manifest
       run: |
         # 1. 模块归位
         for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
@@ -33,24 +33,21 @@ jobs:
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 核心：强制修改 Manifest 中的包名为 com.aide.termux
-        # 这一步是为了让 AIDE+ 能够通过包名查找到主 Activity
-        find . -name "AndroidManifest.xml" -exec sed -i 's/package="com.termux"/package="com.aide.termux"/g' {} +
-        find . -name "AndroidManifest.xml" -exec sed -i 's/package="com.termux.terminal"/package="com.aide.termux.terminal"/g' {} +
+        # 2. 移除 Manifest 中的 package 属性（防止 Gradle 8.x 报错）
+        # 我们直接删除 package="..." 这段代码，改由 build.gradle 的 namespace 控制
+        find . -name "AndroidManifest.xml" -exec sed -i 's/package="[^"]*"//g' {} +
 
-        # 3. 修复代码中的资源和 BuildConfig 引用
+        # 3. 修复代码引用与 Log
         find . -name "*.java" -exec sed -i 's/import com.termux.shared.R;/import com.termux.R;/g' {} +
         find . -name "*.java" -exec sed -i 's/import com.termux.view.R;/import com.termux.R;/g' {} +
         find . -name "*.java" -exec sed -i 's/com.termux.shared.R./com.termux.R./g' {} +
         find . -name "*.java" -exec sed -i 's/com.termux.view.R./com.termux.R./g' {} +
         find . -name "*.java" -exec sed -i 's/import com.termux.app.BuildConfig;/import com.termux.BuildConfig;/g' {} +
         find . -name "*.java" -exec sed -i 's/import com.termux.shared.BuildConfig;/import com.termux.BuildConfig;/g' {} +
-        
-        # 4. 修复 Log 兼容性
         find . -name "*.java" -exec sed -i 's/io.github.zeroaicy.util.Log/android.util.Log/g' {} +
         find . -name "*.java" -exec sed -i 's/Log.d("/Log.d("Termux", "/g' {} +
 
-        # 5. 资源去重
+        # 4. 资源去重
         find termux-shared/src/main/res/ -type f | while read file; do
             filename=$(basename "$file")
             dirname=$(basename $(dirname "$file"))
@@ -59,7 +56,7 @@ jobs:
             fi
         done
 
-        # 6. 生成基础构建脚本
+        # 5. 生成基础构建脚本
         echo "include ':app', ':terminal-emulator'" > settings.gradle
         cat <<'EOF' > build.gradle
         buildscript {
@@ -71,7 +68,7 @@ jobs:
         }
         EOF
 
-        # 7. 配置 terminal-emulator
+        # 6. 配置 terminal-emulator (使用对应的 namespace)
         cat <<'EOF' > terminal-emulator/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -82,14 +79,14 @@ jobs:
         dependencies { implementation 'androidx.annotation:annotation:1.7.0' }
         EOF
 
-        # 8. 配置主 App (应用包名设为 com.aide.termux)
+        # 7. 配置主 App (应用包名设为 com.aide.termux)
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
             compileSdk 34
             namespace "com.termux"
             defaultConfig {
-                applicationId "com.aide.termux"  // 关键：对齐 AIDE+ 的调用
+                applicationId "com.aide.termux"
                 minSdk 21
                 targetSdk 34
                 versionCode 1
