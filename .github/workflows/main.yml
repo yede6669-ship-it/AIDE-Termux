@@ -1,4 +1,4 @@
-name: Android CI (Final Toolchain Fix)
+name: Android CI (Environment Bridge Solution)
 
 on:
   push:
@@ -7,8 +7,6 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # 关键：告诉 Android SDK 工具跳过 JDK 版本检查，允许在 JDK 11 下运行 SDK Manager
-  SKIP_JDK_VERSION_CHECK: true
 
 jobs:
   build:
@@ -18,25 +16,32 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Set up JDK 11
+    # 安装两个版本的 JDK，GitHub Actions 会记住它们的路径
+    - name: Set up Java 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        java-package: jdk
+
+    - name: Set up Java 11
       uses: actions/setup-java@v4
       with:
         java-version: '11'
         distribution: 'temurin'
+        java-package: jdk
 
+    # 此时默认 Java 环境是最后安装的 Java 11，我们需要切换回 17 来跑 SDK 安装
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
-      # 确保环境变量在此步骤生效
       env:
-        SKIP_JDK_VERSION_CHECK: true
+        JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }} # 强制在此步骤使用 Java 17
 
     - name: Atomic Project Reset
       run: |
-        # 清理并创建极简单模块结构
         find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' -exec rm -rf {} +
         mkdir -p app/src/main/java app/src/main/res/values
         
-        # 写入纯净配置
         cat <<'EOF' > app/src/main/AndroidManifest.xml
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux">
@@ -79,9 +84,12 @@ jobs:
         gradle-version: 7.3.3
         cache-disabled: true
 
-    - name: Build APK
+    - name: Build APK (Force Java 11)
       run: |
-        # 强制使用 UTF-8 编码，防止 XML 解析时出现莫名其妙的堆栈错误
+        # 核心：在运行命令前，手动将 JAVA_HOME 指向 Java 11
+        export JAVA_HOME=$JAVA_HOME_11_X64
+        export PATH=$JAVA_HOME/bin:$PATH
+        
         export GRADLE_OPTS="-Dfile.encoding=UTF-8 -Xmx3g"
         gradle assembleDebug --no-daemon --stacktrace
 
@@ -89,5 +97,5 @@ jobs:
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Success-Build
+        name: Termux-Final-Build
         path: "app/build/outputs/apk/debug/*.apk"
