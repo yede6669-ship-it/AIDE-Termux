@@ -1,4 +1,4 @@
-name: Android CI (Final Dependency Sanitizer)
+name: Android CI (Syntax Fix)
 
 on:
   push:
@@ -33,9 +33,9 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Project Reconstruction & KMP Fix
+    - name: Project Reconstruction & Fix
       run: |
-        # 1. 自动寻路归位
+        # 1. 自动寻路并归位模块
         EMULATOR_PATH=$(find . -maxdepth 3 -name "terminal-emulator" -type d | head -n 1)
         VIEW_PATH=$(find . -maxdepth 3 -name "terminal-view" -type d | head -n 1)
         SHARED_PATH=$(find . -maxdepth 3 -name "termux-shared" -type d | head -n 1)
@@ -45,10 +45,10 @@ jobs:
         [ -n "$SHARED_PATH" ] && mv "$SHARED_PATH" ./termux-shared || true
         [ -n "$APP_PATH" ] && mv "$APP_PATH" ./app || true
 
-        # 2. 语法清理
+        # 2. 批量修复旧语法
         find . -name "build.gradle" -exec sed -i 's/\bcompile\b/implementation/g' {} +
 
-        # 3. 根配置：加入 JitPack 并在全局层面屏蔽 KMP 冲突库
+        # 3. 根配置：修正注释语法，加入 JitPack
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
@@ -56,7 +56,7 @@ jobs:
         }
         allprojects {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
-            # 暴力拦截：在所有项目中禁止 window-core 的 alpha 版本
+            // 修正：这里使用 Groovy 注释 // 彻底拦截 KMP 冲突
             configurations.all {
                 exclude group: 'androidx.window', module: 'window-core'
                 exclude group: 'androidx.window', module: 'window-java'
@@ -72,11 +72,9 @@ jobs:
         android.useAndroidX=true
         android.enableJetifier=true
         android.suppressUnsupportedCompileSdk=31
-        # 禁用新版依赖解析器的严格模式
-        android.dependencyResolutionManagement.sharedRepositories=true
         EOF
 
-        # 4. 重写 app/build.gradle：精简依赖并强制执行
+        # 4. 重载 app 模块配置
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -88,7 +86,6 @@ jobs:
                 targetSdk 31
                 ndk { abiFilters 'arm64-v8a' }
             }
-            // 进一步强制版本对齐，确保不触发 KMP 变体选择
             configurations.all {
                 resolutionStrategy {
                     force 'androidx.core:core:1.6.0'
@@ -121,12 +118,12 @@ jobs:
       run: |
         export JAVA_HOME=$JAVA_HOME_11_X64
         export PATH=$JAVA_HOME/bin:$PATH
-        # 使用 --refresh-dependencies 确保丢弃错误的 alpha 缓存
+        # 使用 --refresh-dependencies 确保清理错误的 alpha 缓存
         gradle :app:assembleDebug --no-daemon --refresh-dependencies
 
     - name: Upload
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Success-Final
+        name: Termux-Build-Final
         path: "app/build/outputs/apk/debug/*.apk"
