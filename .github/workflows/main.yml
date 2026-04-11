@@ -1,4 +1,4 @@
-name: Android CI (Resource Linkage Fix)
+name: Android CI (Preference Fix)
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
       env:
         JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
 
-    - name: Precise Project Merge
+    - name: Strategic Refactoring & Dependency Injection
       run: |
         # 1. 模块归位
         for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
@@ -35,24 +35,21 @@ jobs:
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 源码修复
+        # 2. 暴力修复源码引用
         find . -name "*.java" -exec sed -i 's/io.github.zeroaicy.util.Log/android.util.Log/g' {} +
         
-        # 3. 【改进】智能去重：只删除图片等二进制冲突，保留 values 目录下的定义
-        # 这样可以防止 colors.xml 或 attrs.xml 被删掉导致资源丢失
+        # 3. 智能资源去重 (保护 values 目录)
         find termux-shared/src/main/res/ -type f | while read file; do
             filename=$(basename "$file")
             dirname=$(basename $(dirname "$file"))
-            # 如果不是 values 文件夹，且 app 中有同名文件，则删除
             if [ "$dirname" != "values" ]; then
                 find app/src/main/res/ -name "$filename" -exec rm -f "$file" \;
             fi
         done
 
-        # 4. 重新定义 settings.gradle
+        # 4. 基础配置
         echo "include ':app', ':terminal-emulator'" > settings.gradle
 
-        # 5. 配置根目录 build.gradle
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
@@ -63,7 +60,7 @@ jobs:
         }
         EOF
 
-        # 6. 配置基础模块 terminal-emulator
+        # 5. 独立模块 terminal-emulator
         cat <<'EOF' > terminal-emulator/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -74,7 +71,7 @@ jobs:
         dependencies { implementation 'androidx.annotation:annotation:1.7.0' }
         EOF
 
-        # 7. 配置 app 模块 (合并并补全资源)
+        # 6. 【核心修复】主 App 配置及补全 Preference 依赖
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -101,15 +98,21 @@ jobs:
         }
         dependencies {
             implementation project(':terminal-emulator')
+            
+            // 核心 AndroidX 支持库
             implementation 'androidx.appcompat:appcompat:1.6.1'
             implementation 'com.google.android.material:material:1.11.0'
+            implementation 'androidx.preference:preference:1.2.1'  // 修复 key/summary 找不到
+            implementation 'androidx.lifecycle:lifecycle-runtime:2.6.2'
+            implementation 'androidx.lifecycle:lifecycle-common:2.6.2'
+            
+            // Termux 专用依赖
             implementation 'com.google.guava:guava:33.0.0-android'
             implementation 'com.termux:termux-am-library:v2.0.0'
             implementation 'androidx.annotation:annotation:1.7.0'
         }
         EOF
 
-        # 8. 强制开启资源非传递 R 类，帮助 AAPT 找到跨目录资源
         echo "android.useAndroidX=true" > gradle.properties
         echo "android.enableJetifier=true" >> gradle.properties
         echo "android.nonTransitiveRClass=false" >> gradle.properties
@@ -121,5 +124,5 @@ jobs:
 
     - name: Build APK
       run: |
-        # 尝试编译，这次保留了所有的 values 定义
+        # 最后的冲刺
         gradle :app:assembleDebug --no-daemon -x lint
