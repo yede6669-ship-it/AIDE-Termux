@@ -1,4 +1,4 @@
-name: Android CI (Final Survival Mode)
+name: Android CI (Multi-Module Mode)
 
 on:
   push:
@@ -46,9 +46,13 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Heavy Duty Script Patching
+    - name: Repair Project Structure
       run: |
-        # 1. 彻底重写根目录 build.gradle
+        # 1. 修复 settings.gradle (核心修复：让 Gradle 认识所有模块)
+        # 假设模块在根目录下，这通常是 AIDE 项目的结构
+        echo "include ':app', ':terminal-view'" > settings.gradle
+
+        # 2. 修复根目录 build.gradle
         cat <<EOF > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -59,30 +63,24 @@ jobs:
         }
         EOF
 
-        # 2. 核心语法清洗 app/build.gradle
-        # 修复 JavaVersion.VERSION_8 -> JavaVersion.VERSION_1_8
-        sed -i 's/JavaVersion.VERSION_8/JavaVersion.VERSION_1_8/g' app/build.gradle
-        
-        # 修复 sourceCompatibility/targetCompatibility 的写法
-        sed -i 's/sourceCompatibility VERSION_1_8/sourceCompatibility JavaVersion.VERSION_1_8/g' app/build.gradle
-        sed -i 's/targetCompatibility VERSION_1_8/targetCompatibility JavaVersion.VERSION_1_8/g' app/build.gradle
+        # 3. 批量清洗所有子模块的语法错误
+        # 修复 VERSION_8 笔误和清理 buildFeatures
+        find . -name "*.gradle" -type f -exec sed -i 's/JavaVersion.VERSION_8/JavaVersion.VERSION_1_8/g' {} +
+        find . -name "*.gradle" -type f -exec sed -i '/buildFeatures/,/}/d' {} +
+        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
 
-        # 清除 buildFeatures 块
-        sed -i '/buildFeatures/,/}/d' app/build.gradle
-        
-        # 3. 插件头部强制对齐
-        echo "apply plugin: 'com.android.application'" > app/build.gradle.new
-        grep -v "apply plugin" app/build.gradle >> app/build.gradle.new
-        mv app/build.gradle.new app/build.gradle
+        # 4. 强制补全 app 模块插件
+        if ! grep -q "com.android.application" app/build.gradle; then
+           sed -i '1i apply plugin: "com.android.application"' app/build.gradle
+        fi
 
     - name: Build Release APK
-      # 加上 --no-daemon 避免内存抖动，跳过 lint 保证速度
-      run: ./gradlew :app:assembleRelease -x lint --stacktrace --no-daemon
+      # 尝试编译整个项目，跳过 lint
+      run: ./gradlew assembleRelease -x lint --stacktrace --no-daemon
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: AIDE-Termux-Package
         path: |
-          **/build/outputs/apk/release/*.apk
-          app/build/outputs/apk/**/*.apk
+          **/build/outputs/apk/**/*.apk
