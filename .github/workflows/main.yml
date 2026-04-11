@@ -1,20 +1,9 @@
-name: Android CI (Pure Build)
+name: Android CI (Precise Reconstruction)
 
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # 彻底禁用所有可能导致快照报错的特性
-  GRADLE_OPTS: >-
-    -Dorg.gradle.jvmargs=-Xmx2048m 
-    -Dorg.gradle.vfs.watch=false 
-    -Dorg.gradle.daemon=false 
-    -Dorg.gradle.parallel=false 
-    -Dorg.gradle.cached.build.obj.serial=false
-    -Dorg.gradle.configureondemand=false
 
 jobs:
   build:
@@ -26,85 +15,63 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up JDK & SDK
-      uses: android-actions/setup-android@v3
-
-    - name: Use JDK 11
+    - name: Set up JDK 11
       uses: actions/setup-java@v4
       with:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Nuclear Cleanup & Isolation
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Organize Project Files
       run: |
-        # 1. 彻底删除所有残留，甚至包括之前生成的 .gradle
-        rm -rf .gradle build .aide gen bin
-        find . -name "build" -type d -exec rm -rf {} +
+        # 创建目录结构
+        mkdir -p aide-termux/src/main app/src/main terminal-emulator/src/main terminal-view/src/main termux-shared/src/main
         
-        # 2. 重新初始化最基础的 Wrapper
-        mkdir -p gradle/wrapper
-        curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
-        printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-6.7.1-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
-        curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
+        # 1. 映射 AndroidManifest
+        [ -f "AndroidManifest.xml" ] && cp "AndroidManifest.xml" "aide-termux/src/main/AndroidManifest.xml"
+        [ -f "AndroidManifest (1).xml" ] && cp "AndroidManifest (1).xml" "app/src/main/AndroidManifest.xml"
+        [ -f "AndroidManifest (2).xml" ] && cp "AndroidManifest (2).xml" "terminal-emulator/src/main/AndroidManifest.xml"
+        [ -f "AndroidManifest (3).xml" ] && cp "AndroidManifest (3).xml" "terminal-view/src/main/AndroidManifest.xml"
+        [ -f "AndroidManifest (4).xml" ] && cp "AndroidManifest (4).xml" "termux-shared/src/main/AndroidManifest.xml"
+
+        # 2. 映射并修复 build.gradle (将 compile 替换为 implementation)
+        fix_gradle() {
+          sed -i 's/compile /implementation /g' "$1"
+          sed -i 's/api /implementation /g' "$1"
+          # 确保支持 AndroidX
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.enableJetifier=true" >> gradle.properties
+        }
+
+        [ -f "build.gradle" ] && cp "build.gradle" "aide-termux/build.gradle" && fix_gradle "aide-termux/build.gradle"
+        [ -f "build (1).gradle" ] && cp "build (1).gradle" "app/build.gradle" && fix_gradle "app/build.gradle"
+        [ -f "build (2).gradle" ] && cp "build (2).gradle" "terminal-emulator/build.gradle" && fix_gradle "terminal-emulator/build.gradle"
+        [ -f "build (3).gradle" ] && cp "build (3).gradle" "terminal-view/build.gradle" && fix_gradle "terminal-view/build.gradle"
+        [ -f "build (4).gradle" ] && cp "build (4).gradle" "termux-shared/build.gradle" && fix_gradle "termux-shared/build.gradle"
+
+        # 3. 生成 settings.gradle
+        echo "include ':aide-termux', ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
+
+        # 4. 特殊修复：给 aide-termux 的清单补上 package，否则会报 8000 条错
+        if ! grep -q "package=" "aide-termux/src/main/AndroidManifest.xml"; then
+          sed -i 's/<manifest/<manifest package="com.aide.termux"/g' "aide-termux/src/main/AndroidManifest.xml"
+        fi
+        # 替换所有清单中的 ${applicationId} 占位符
+        find . -name "AndroidManifest.xml" -exec sed -i 's/\${applicationId}/com.termux/g' {} +
+
+    - name: Initialize Gradle Wrapper
+      run: |
+        gradle wrapper --gradle-version 6.7.1
         chmod +x gradlew
 
-    - name: Minimalist Reconstruction
+    - name: Build APK
       run: |
-        # 识别模块
-        MODULE_LIST=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|\1|")
-        
-        # 生成 settings.gradle
-        echo "rootProject.name = 'AIDE-Termux'" > settings.gradle
-        for MOD in $MODULE_LIST; do
-          echo "include ':$MOD'" >> settings.gradle
-        done
-
-        # 根 build.gradle
-        printf "buildscript {\n    repositories { google(); mavenCentral() }\n    dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }\n}\nallprojects {\n    repositories { google(); mavenCentral() }\n}\n" > build.gradle
-
-        for MOD_NAME in $MODULE_LIST; do
-          MOD_DIR="./$MOD_NAME"
-          TARGET_M_DIR="$MOD_DIR/src/main"
-          TARGET_M_PATH="$TARGET_M_DIR/AndroidManifest.xml"
-          mkdir -p "$TARGET_M_DIR"
-          
-          # 寻找并移动 Manifest (排除 build 文件夹)
-          REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
-          [ -n "$REAL_M" ] && [ "$(realpath "$REAL_M")" != "$(realpath "$TARGET_M_PATH")" ] && cp "$REAL_M" "$TARGET_M_PATH"
-
-          # 强制包名
-          SAFE_PKG="com.termux.${MOD_NAME//-/_}"
-          if [ ! -f "$TARGET_M_PATH" ]; then
-            printf '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="%s" />' "$SAFE_PKG" > "$TARGET_M_PATH"
-          else
-            sed -i "s/package=\"[^\"]*\"/package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
-          fi
-
-          # 极简 build.gradle
-          BFILE="$MOD_DIR/build.gradle"
-          PLUGIN="com.android.library"; [[ "$MOD_NAME" == "app" ]] && PLUGIN="com.android.application"
-          
-          printf "apply plugin: '%s'\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n        minSdkVersion 21\n        targetSdkVersion 33\n" "$PLUGIN" > "$BFILE"
-          [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "$BFILE"
-          printf "    }\n    lintOptions { abortOnError false }\n}\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "$BFILE"
-          if [[ "$MOD_NAME" == "app" ]]; then
-              for OTHER_MOD in $MODULE_LIST; do
-                  [[ "$OTHER_MOD" != "app" ]] && printf "    implementation project(':$OTHER_MOD')\n" >> "$BFILE"
-              done
-          fi
-          printf "}\n" >> "$BFILE"
-        done
-
-    - name: Execute Pure Build
-      # --project-cache-dir 使缓存目录完全独立，避开可能的权限/锁问题
-      run: |
-        ./gradlew assembleDebug --no-daemon \
-        --no-build-cache \
-        --project-cache-dir /tmp/gradle_cache \
-        --stacktrace
+        ./gradlew assembleDebug --no-daemon --stacktrace
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Pure-APK
+        name: AIDE-Termux-Package
         path: "**/build/outputs/apk/**/*.apk"
