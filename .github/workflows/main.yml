@@ -45,14 +45,18 @@ jobs:
 
     - name: Patch Legacy Build Scripts (Hardcore Fix)
       run: |
-        # 1. 先把 jcenter 替换为 mavenCentral
+        # 1. 替换仓库地址
         find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
-        
-        # 2. 把不认识的 google() 替换为旧版 Gradle 认识的完整 URL 格式
         find . -name "*.gradle" -type f -exec sed -i "s/google()/maven { url 'https:\/\/maven.google.com' }/g" {} +
         
-        # 3. 确保根目录 build.gradle 的 repositories 块里有这个地址
-        # 我们直接强行在第一行插入
+        # 2. 核心修复：删除 Gradle 2.2 不认识的现代语法模块
+        # 删除整个 buildFeatures 块
+        find . -name "*.gradle" -type f -exec sed -i '/buildFeatures {/,/}/d' {} +
+        # 删除 viewBinding 等现代配置（如果存在）
+        find . -name "*.gradle" -type f -exec sed -i 's/viewBinding true//g' {} +
+        find . -name "*.gradle" -type f -exec sed -i 's/dataBinding true//g' {} +
+        
+        # 3. 强制在根目录注入 Google 仓库
         sed -i "6i \        maven { url 'https:\/\/maven.google.com' }" build.gradle
 
     - name: Build with Gradle 2.2
