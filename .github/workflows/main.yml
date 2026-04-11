@@ -1,4 +1,4 @@
-name: Android CI (Final Dependency Recovery)
+name: Android CI (Annotation Fix)
 
 on:
   push:
@@ -41,7 +41,9 @@ jobs:
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 精确重写子模块 build.gradle (补全关键依赖)
+        # 2. 精确重写子模块 build.gradle (补全所有基础依赖)
+        
+        # terminal-emulator: 补充 annotation
         cat <<'EOF' > terminal-emulator/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -49,8 +51,12 @@ jobs:
             namespace "com.termux.terminal"
             defaultConfig { minSdk 21 }
         }
+        dependencies {
+            implementation 'androidx.annotation:annotation:1.2.0'
+        }
         EOF
 
+        # termux-shared: 补充基础库
         cat <<'EOF' > termux-shared/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -60,11 +66,12 @@ jobs:
         }
         dependencies {
             implementation 'androidx.appcompat:appcompat:1.3.1'
-            // 必须包含 termux-am 库
+            implementation 'androidx.annotation:annotation:1.2.0'
             implementation 'com.termux:termux-am-library:v2.0.0'
         }
         EOF
 
+        # terminal-view: 补充依赖并修正注解
         cat <<'EOF' > terminal-view/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -75,10 +82,11 @@ jobs:
         dependencies {
             implementation project(':terminal-emulator')
             implementation project(':termux-shared')
+            implementation 'androidx.annotation:annotation:1.2.0'
         }
         EOF
 
-        # 3. 根目录全局配置
+        # 3. 根目录配置
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
@@ -137,12 +145,11 @@ jobs:
       run: |
         export JAVA_HOME=$JAVA_HOME_11_X64
         export PATH=$JAVA_HOME/bin:$PATH
-        # 使用 --info 捕获更详尽的失败原因，万一还没过，我们就知道差哪了
-        gradle :app:assembleDebug --no-daemon --refresh-dependencies --info
+        gradle :app:assembleDebug --no-daemon --refresh-dependencies
 
     - name: Upload
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Success-Final
+        name: Termux-Success-Artifact
         path: "app/build/outputs/apk/debug/*.apk"
