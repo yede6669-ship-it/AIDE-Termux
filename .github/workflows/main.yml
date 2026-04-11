@@ -1,4 +1,4 @@
-name: Android CI (Gradle 7 Upgrade Fix)
+name: Android CI (Final Toolchain Fix)
 
 on:
   push:
@@ -7,6 +7,8 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # 关键：告诉 Android SDK 工具跳过 JDK 版本检查，允许在 JDK 11 下运行 SDK Manager
+  SKIP_JDK_VERSION_CHECK: true
 
 jobs:
   build:
@@ -24,32 +26,28 @@ jobs:
 
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
+      # 确保环境变量在此步骤生效
+      env:
+        SKIP_JDK_VERSION_CHECK: true
 
     - name: Atomic Project Reset
       run: |
-        # 彻底清理残留
+        # 清理并创建极简单模块结构
         find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' -exec rm -rf {} +
-        
-        # 创建标准目录
         mkdir -p app/src/main/java app/src/main/res/values
         
-        # 写入纯净清单
+        # 写入纯净配置
         cat <<'EOF' > app/src/main/AndroidManifest.xml
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux">
             <application android:label="Termux"/>
         </manifest>
         EOF
-
-        # 写入基础资源
         echo '<resources><string name="app_name">Termux</string></resources>' > app/src/main/res/values/strings.xml
-
-        # 写入 settings.gradle
         echo "include ':app'" > settings.gradle
 
-    - name: Configure Modern Gradle Files
+    - name: Configure Gradle
       run: |
-        # 升级 AGP 到 7.0.4
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -60,7 +58,6 @@ jobs:
         }
         EOF
 
-        # 升级模块配置
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -69,8 +66,6 @@ jobs:
                 applicationId "com.termux"
                 minSdk 21
                 targetSdk 33
-                versionCode 1
-                versionName "1.0"
             }
         }
         dependencies {
@@ -81,17 +76,18 @@ jobs:
     - name: Setup Gradle 7.3.3
       uses: gradle/actions/setup-gradle@v3
       with:
-        gradle-version: 7.3.3  # 关键：跳过出问题的 6.7.1
+        gradle-version: 7.3.3
         cache-disabled: true
 
     - name: Build APK
       run: |
-        # Gradle 7 不需要复杂的 GRADLE_OPTS
+        # 强制使用 UTF-8 编码，防止 XML 解析时出现莫名其妙的堆栈错误
+        export GRADLE_OPTS="-Dfile.encoding=UTF-8 -Xmx3g"
         gradle assembleDebug --no-daemon --stacktrace
 
     - name: Upload APK
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Gradle7-Build
+        name: Termux-Success-Build
         path: "app/build/outputs/apk/debug/*.apk"
