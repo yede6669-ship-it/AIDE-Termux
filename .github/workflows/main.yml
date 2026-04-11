@@ -1,4 +1,4 @@
-name: Android CI
+name: Android CI (Legacy Archaeology Mode)
 
 on:
   push:
@@ -18,49 +18,42 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up JDK 17 (For SDK Manager)
-      # 第一步：先用 JDK 17 避开 sdkmanager 的报错
+    - name: Set up JDK 8
+      # Gradle 2.2 绝对跑不动 JDK 11/17，必须回退到 Java 8
       uses: actions/setup-java@v4
       with:
-        java-version: '17'
+        java-version: '8'
         distribution: 'temurin'
 
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Install NDK
+    - name: Force Inject Gradle 2.2 Wrapper
+      # 强行注入那个时代的“心脏”
       run: |
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
-
-    - name: Switch to JDK 11 (For Build)
-      # 第二步：环境装好了，切换回 JDK 11 编译老项目
-      uses: actions/setup-java@v4
-      with:
-        java-version: '11'
-        distribution: 'temurin'
-        cache: gradle
-
-    - name: Force Inject Gradle Wrapper
-      run: |
-        echo "🚀 正在注入兼容性构建引导 (Gradle 7.5)..."
+        echo "🏺 正在启动考古模式：注入 Gradle 2.2..."
         mkdir -p gradle/wrapper
-        curl -L https://raw.githubusercontent.com/gradle/gradle/v7.5.0/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
-        printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-7.5-bin.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
-        curl -L https://raw.githubusercontent.com/gradle/gradle/v7.5.0/gradlew -o gradlew
+        curl -L https://raw.githubusercontent.com/gradle/gradle/v2.2/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+        
+        printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-2.2-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
+        
+        curl -L https://raw.githubusercontent.com/gradle/gradle/v2.2/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Fix Legacy Gradle Scripts
+    - name: Fix Legacy Repositories
+      # 那个年代连 mavenCentral 都不一定稳，强行加上 google 和 jcenter 的旧版镜像
       run: |
-        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
-        find . -name "*.gradle" -type f -exec sed -i 's/google()/google()/g' {} +
+        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/jcenter()\n        google()/g' {} +
+        # 很多旧项目缺少 google() 仓库定义
+        find . -name "build.gradle" -type f -exec sed -i 's/repositories {/repositories {\n        google()/g' {} +
 
-    - name: Build with Gradle
-      run: ./gradlew assembleRelease --stacktrace --no-daemon
+    - name: Build with Gradle 2.2
+      # 考古版 Gradle 不支持很多现代参数，只求能跑通
+      run: ./gradlew assembleRelease --info
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Package
+        name: AIDE-Termux-Antique-Output
         path: |
-          **/build/outputs/apk/release/*.apk
-          **/build/outputs/zygisk/*.zip
+          **/build/outputs/apk/*.apk
