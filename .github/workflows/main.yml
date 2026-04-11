@@ -1,4 +1,4 @@
-name: Android CI (Extreme Cleanup)
+name: Android CI (Pure Build)
 
 on:
   push:
@@ -7,11 +7,13 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # 强制关闭所有增量功能，只求编译成功
+  # 彻底禁用所有可能导致快照报错的特性
   GRADLE_OPTS: >-
     -Dorg.gradle.jvmargs=-Xmx2048m 
     -Dorg.gradle.vfs.watch=false 
     -Dorg.gradle.daemon=false 
+    -Dorg.gradle.parallel=false 
+    -Dorg.gradle.cached.build.obj.serial=false
     -Dorg.gradle.configureondemand=false
 
 jobs:
@@ -27,43 +29,37 @@ jobs:
     - name: Set up JDK & SDK
       uses: android-actions/setup-android@v3
 
-    - name: Install Build Tools
-      run: |
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "platforms;android-33" "build-tools;30.0.3"
-
     - name: Use JDK 11
       uses: actions/setup-java@v4
       with:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Nuclear Cleanup (AIDE & Gradle)
+    - name: Nuclear Cleanup & Isolation
       run: |
-        # 物理删除所有可能干扰 Gradle 快照的非源码文件夹
+        # 1. 彻底删除所有残留，甚至包括之前生成的 .gradle
+        rm -rf .gradle build .aide gen bin
         find . -name "build" -type d -exec rm -rf {} +
-        find . -name ".gradle" -type d -exec rm -rf {} +
-        find . -name ".aide" -type d -exec rm -rf {} +
-        find . -name "gen" -type d -exec rm -rf {} +
-        find . -name "bin" -type d -exec rm -rf {} +
         
-        # 重新初始化 Wrapper
+        # 2. 重新初始化最基础的 Wrapper
         mkdir -p gradle/wrapper
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
         printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-6.7.1-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Atomic Reconstruction
+    - name: Minimalist Reconstruction
       run: |
         # 识别模块
         MODULE_LIST=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|\1|")
         
-        # 生成配置
-        echo "// Forced Clean Settings" > settings.gradle
+        # 生成 settings.gradle
+        echo "rootProject.name = 'AIDE-Termux'" > settings.gradle
         for MOD in $MODULE_LIST; do
           echo "include ':$MOD'" >> settings.gradle
         done
 
+        # 根 build.gradle
         printf "buildscript {\n    repositories { google(); mavenCentral() }\n    dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }\n}\nallprojects {\n    repositories { google(); mavenCentral() }\n}\n" > build.gradle
 
         for MOD_NAME in $MODULE_LIST; do
@@ -72,44 +68,43 @@ jobs:
           TARGET_M_PATH="$TARGET_M_DIR/AndroidManifest.xml"
           mkdir -p "$TARGET_M_DIR"
           
-          # 移动 Manifest
-          REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/src/main/*" -not -path "*/build/*" | head -n 1)
-          if [ -n "$REAL_M" ]; then
-             cp "$REAL_M" "$TARGET_M_PATH"
-          fi
+          # 寻找并移动 Manifest (排除 build 文件夹)
+          REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
+          [ -n "$REAL_M" ] && [ "$(realpath "$REAL_M")" != "$(realpath "$TARGET_M_PATH")" ] && cp "$REAL_M" "$TARGET_M_PATH"
 
-          # 强制对齐包名
+          # 强制包名
           SAFE_PKG="com.termux.${MOD_NAME//-/_}"
           if [ ! -f "$TARGET_M_PATH" ]; then
-            printf '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="%s" />\n' "$SAFE_PKG" > "$TARGET_M_PATH"
+            printf '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="%s" />' "$SAFE_PKG" > "$TARGET_M_PATH"
           else
             sed -i "s/package=\"[^\"]*\"/package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
-            grep -q "package=" "$TARGET_M_PATH" || sed -i "s/<manifest/<manifest package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
           fi
 
-          # 生成 build.gradle
+          # 极简 build.gradle
           BFILE="$MOD_DIR/build.gradle"
           PLUGIN="com.android.library"; [[ "$MOD_NAME" == "app" ]] && PLUGIN="com.android.application"
           
-          printf "apply plugin: '%s'\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n" "$PLUGIN" > "$BFILE"
+          printf "apply plugin: '%s'\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n        minSdkVersion 21\n        targetSdkVersion 33\n" "$PLUGIN" > "$BFILE"
           [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "$BFILE"
-          printf "        minSdkVersion 21\n        targetSdkVersion 33\n    }\n    lintOptions { abortOnError false }\n}\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "$BFILE"
+          printf "    }\n    lintOptions { abortOnError false }\n}\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "$BFILE"
           if [[ "$MOD_NAME" == "app" ]]; then
               for OTHER_MOD in $MODULE_LIST; do
-                  [[ "$OTHER_MOD" != "app" ]] && printf "    implementation project(':%s')\n" "$OTHER_MOD" >> "$BFILE"
+                  [[ "$OTHER_MOD" != "app" ]] && printf "    implementation project(':$OTHER_MOD')\n" >> "$BFILE"
               done
           fi
           printf "}\n" >> "$BFILE"
         done
 
-    - name: Build Nuclear APK
-      # 使用 --no-daemon 和彻底关闭缓存，防止任何快照校验
-      run: ./gradlew assembleDebug --no-daemon --no-build-cache --no-scan --stacktrace
+    - name: Execute Pure Build
+      # --project-cache-dir 使缓存目录完全独立，避开可能的权限/锁问题
+      run: |
+        ./gradlew assembleDebug --no-daemon \
+        --no-build-cache \
+        --project-cache-dir /tmp/gradle_cache \
+        --stacktrace
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Nuclear-Build
-        path: |
-          **/build/outputs/apk/**/*.apk
-          **/build/outputs/aar/**/*.aar
+        name: AIDE-Termux-Pure-APK
+        path: "**/build/outputs/apk/**/*.apk"
