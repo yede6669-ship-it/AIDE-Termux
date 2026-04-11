@@ -1,4 +1,4 @@
-name: Android CI (Duplicate Resource Fix)
+name: Android CI (Resource Linkage Fix)
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
       env:
         JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
 
-    - name: Deep Project Cleaning & Merging
+    - name: Precise Project Merge
       run: |
         # 1. 模块归位
         for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
@@ -35,22 +35,24 @@ jobs:
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 暴力修复源码与冲突资源
-        # 替换第三方 Log
+        # 2. 源码修复
         find . -name "*.java" -exec sed -i 's/io.github.zeroaicy.util.Log/android.util.Log/g' {} +
         
-        # 【关键】解决资源冲突：如果 app 中已存在，则删除子模块中的同名资源
-        # 我们重点检查 drawable 和 layout 文件夹
+        # 3. 【改进】智能去重：只删除图片等二进制冲突，保留 values 目录下的定义
+        # 这样可以防止 colors.xml 或 attrs.xml 被删掉导致资源丢失
         find termux-shared/src/main/res/ -type f | while read file; do
             filename=$(basename "$file")
-            # 如果在 app 模块的相同路径下找到了同名文件，就删除 shared 里的
-            find app/src/main/res/ -name "$filename" -exec rm -f "$file" \;
+            dirname=$(basename $(dirname "$file"))
+            # 如果不是 values 文件夹，且 app 中有同名文件，则删除
+            if [ "$dirname" != "values" ]; then
+                find app/src/main/res/ -name "$filename" -exec rm -f "$file" \;
+            fi
         done
 
-        # 3. 重新定义 settings.gradle
+        # 4. 重新定义 settings.gradle
         echo "include ':app', ':terminal-emulator'" > settings.gradle
 
-        # 4. 配置根目录 build.gradle
+        # 5. 配置根目录 build.gradle
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
@@ -61,7 +63,7 @@ jobs:
         }
         EOF
 
-        # 5. 配置基础模块 terminal-emulator
+        # 6. 配置基础模块 terminal-emulator
         cat <<'EOF' > terminal-emulator/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -72,7 +74,7 @@ jobs:
         dependencies { implementation 'androidx.annotation:annotation:1.7.0' }
         EOF
 
-        # 6. 配置 app 模块 (合并源码路径)
+        # 7. 配置 app 模块 (合并并补全资源)
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -86,22 +88,15 @@ jobs:
             }
             sourceSets {
                 main {
-                    java.srcDirs = [
-                        'src/main/java', 
-                        '../termux-shared/src/main/java', 
-                        '../terminal-view/src/main/java'
-                    ]
-                    res.srcDirs = [
-                        'src/main/res', 
-                        '../termux-shared/src/main/res', 
-                        '../terminal-view/src/main/res'
-                    ]
+                    java.srcDirs = ['src/main/java', '../termux-shared/src/main/java', '../terminal-view/src/main/java']
+                    res.srcDirs = ['src/main/res', '../termux-shared/src/main/res', '../terminal-view/src/main/res']
                     manifest.srcFile 'src/main/AndroidManifest.xml'
                     jniLibs.srcDirs = ['src/main/jniLibs']
                 }
             }
             packagingOptions {
                 pickFirst '**/libc++_shared.so'
+                exclude 'META-INF/*.kotlin_module'
             }
         }
         dependencies {
@@ -114,6 +109,7 @@ jobs:
         }
         EOF
 
+        # 8. 强制开启资源非传递 R 类，帮助 AAPT 找到跨目录资源
         echo "android.useAndroidX=true" > gradle.properties
         echo "android.enableJetifier=true" >> gradle.properties
         echo "android.nonTransitiveRClass=false" >> gradle.properties
@@ -125,4 +121,5 @@ jobs:
 
     - name: Build APK
       run: |
+        # 尝试编译，这次保留了所有的 values 定义
         gradle :app:assembleDebug --no-daemon -x lint
