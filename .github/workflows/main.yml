@@ -1,107 +1,82 @@
-name: Android CI (Final Success Version)
+name: Android CI (Multi-Module Full Fix)
 
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 1. 设置 Java 17 以支持 SDK Manager 运行
     - name: Set up Java 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
-        java-package: jdk
 
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
       env:
         JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
 
-    # 2. 设置 Java 11 用于 Gradle 编译 (解决旧版兼容性)
-    - name: Set up Java 11
+    - name: Set up Java 11 (For Build)
       uses: actions/setup-java@v4
       with:
         java-version: '11'
         distribution: 'temurin'
-        java-package: jdk
 
-    - name: Project Infrastructure Reconstruction
+    # --- 关键修改：不再删除所有文件夹，只通过脚本修正配置 ---
+    - name: Inject Configuration
       run: |
-        # 清理旧的尝试痕迹，保留核心
-        find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' -exec rm -rf {} +
-        
-        # 创建标准 Android 项目结构
-        mkdir -p app/src/main/java app/src/main/res/values
-        
-        # --- 关键：解决 AndroidX 报错 ---
-        echo "android.useAndroidX=true" > gradle.properties
-        echo "android.enableJetifier=true" >> gradle.properties
-        echo "android.suppressUnsupportedCompileSdk=31" >> gradle.properties
-
-        # 写入纯净的 AndroidManifest.xml
-        cat <<'EOF' > app/src/main/AndroidManifest.xml
-        <?xml version="1.0" encoding="utf-8"?>
-        <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux">
-            <application android:label="Termux" android:theme="@style/Theme.AppCompat.Light"/>
-        </manifest>
+        # 1. 在根目录生成 gradle.properties
+        cat <<'EOF' > gradle.properties
+        android.useAndroidX=true
+        android.enableJetifier=true
+        android.suppressUnsupportedCompileSdk=31
         EOF
 
-        # 写入基础资源 (防止编译找不到资源)
-        cat <<'EOF' > app/src/main/res/values/strings.xml
-        <resources>
-            <string name="app_name">Termux</string>
-        </resources>
+        # 2. 修正根目录的 settings.gradle，确保包含所有模块
+        cat <<'EOF' > settings.gradle
+        include ':app'
+        include ':terminal-emulator'
+        include ':terminal-view'
+        include ':termux-shared'
         EOF
 
-        # 写入 settings.gradle
-        echo "include ':app'" > settings.gradle
-
-    - name: Configure Gradle & Dependencies
-      run: |
-        # 使用 AGP 7.4.2 修复 SDK 解析错误
-        cat <<'EOF' > build.gradle
-        buildscript {
-            repositories { google(); mavenCentral() }
-            dependencies { classpath 'com.android.tools.build:gradle:7.4.2' }
-        }
-        allprojects {
-            repositories { google(); mavenCentral() }
-        }
-        EOF
-
-        # 配置 app 模块
+        # 3. 修正 app 模块的 build.gradle，确保它能找到 jniLibs
+        # 注意：这里我们直接用 sed 或者重写 app/build.gradle
+        # 为了保险，我们重写一个适配你结构的 app/build.gradle
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
             compileSdk 31
+            namespace "com.termux"
             defaultConfig {
                 applicationId "com.termux"
                 minSdk 21
                 targetSdk 31
-                versionCode 1
-                versionName "1.0"
+                ndk { abiFilters 'arm64-v8a' }
             }
-            buildTypes {
-                release {
-                    minifyEnabled false
+            sourceSets {
+                main {
+                    jniLibs.srcDirs = ['src/main/jniLibs']
                 }
+            }
+            packagingOptions {
+                doNotStrip "**/libtermux-bootstrap.so"
+                doNotStrip "**/libproot.so"
+                doNotStrip "**/libLoader.so"
             }
         }
         dependencies {
+            implementation project(':terminal-emulator')
+            implementation project(':terminal-view')
+            implementation project(':termux-shared')
             implementation 'androidx.appcompat:appcompat:1.3.1'
-            implementation 'com.google.android.material:material:1.4.0'
         }
         EOF
 
@@ -109,20 +84,16 @@ jobs:
       uses: gradle/actions/setup-gradle@v3
       with:
         gradle-version: 7.5
-        cache-disabled: true
 
-    - name: Final Build APK
+    - name: Build APK
       run: |
-        # 强制切回 Java 11 执行编译任务
         export JAVA_HOME=$JAVA_HOME_11_X64
         export PATH=$JAVA_HOME/bin:$PATH
-        
-        # 执行打包任务，跳过 Lint 检查以提速
-        gradle assembleDebug --no-daemon --stacktrace -x lint
+        # 使用 assembleDebug 编译 app 模块
+        ./gradlew :app:assembleDebug --stacktrace
 
-    - name: Upload Success APK
-      if: success()
+    - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Alpha-APK
+        name: Termux-MultiModule-APK
         path: "app/build/outputs/apk/debug/*.apk"
