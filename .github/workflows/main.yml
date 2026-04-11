@@ -34,10 +34,8 @@ jobs:
 
     - name: Clean & Wrapper
       run: |
-        # 物理清理所有残留缓存
         find . -name "build" -type d -exec rm -rf {} +
         find . -name ".gradle" -type d -exec rm -rf {} +
-        
         mkdir -p gradle/wrapper
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
         printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-6.7.1-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
@@ -46,75 +44,43 @@ jobs:
 
     - name: Atomic Project Reconstruction
       run: |
-        # 1. 重建 settings.gradle，排除自身
+        # 1. 重建 settings.gradle
         MODULES=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|'\:\1'|" | paste -sd "," - | sed 's/,/, /g')
         echo "include $MODULES" > settings.gradle
 
-        # 2. 重建根目录 build.gradle
-        cat << 'EOF' > build.gradle
-        buildscript {
-            repositories { google(); mavenCentral() }
-            dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }
-        }
-        allprojects {
-            repositories { google(); mavenCentral() }
-        }
-        EOF
+        # 2. 重建根目录 build.gradle (使用单引号防止转义)
+        printf "buildscript {\n    repositories { google(); mavenCentral() }\n    dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }\n}\nallprojects {\n    repositories { google(); mavenCentral() }\n}\n" > build.gradle
 
-        # 3. 逐个模块精准手术
-        echo "🚀 执行原子级模块重建..."
+        # 3. 逐个模块重建
         find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
           MOD_DIR=$(dirname "$file")
-          
-          # 创建标准目录
           mkdir -p "$MOD_DIR/src/main"
           
-          # 寻找 Manifest，排除 build 目录
-          REAL_MANIFEST=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
-          if [ -n "$REAL_MANIFEST" ] && [ "$REAL_MANIFEST" != "$MOD_DIR/src/main/AndroidManifest.xml" ]; then
-             cp "$REAL_MANIFEST" "$MOD_DIR/src/main/AndroidManifest.xml"
-          fi
+          # 寻找并移动 Manifest
+          REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
+          [ -n "$REAL_M" ] && [ "$REAL_M" != "$MOD_DIR/src/main/AndroidManifest.xml" ] && cp "$REAL_M" "$MOD_DIR/src/main/AndroidManifest.xml"
 
-          # 注入 Manifest 信息
+          # 修复 Manifest 内容
           MPATH="$MOD_DIR/src/main/AndroidManifest.xml"
           if [ ! -f "$MPATH" ]; then
             echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux" />' > "$MPATH"
           else
             sed -i 's/\${applicationId}/com.termux/g' "$MPATH"
-            if ! grep -q "package=" "$MPATH"; then
-              sed -i 's/<manifest/<manifest package="com.termux"/g' "$MPATH"
-            fi
+            grep -q "package=" "$MPATH" || sed -i 's/<manifest/<manifest package="com.termux"/g' "$MPATH"
           fi
 
           # 4. 生成洁净的 build.gradle
-          PKG_NAME="com.termux"
           PLUGIN="com.android.library"
-          if [[ "$MOD_DIR" == *"app"* ]]; then PLUGIN="com.android.application"; fi
+          [[ "$MOD_DIR" == *"app"* ]] && PLUGIN="com.android.application"
           
-          cat <<EOF > "${file}.tmp"
-        apply plugin: '$PLUGIN'
-        android {
-            compileSdkVersion 33
-            buildToolsVersion '30.0.3'
-            defaultConfig {
-                if ('$PLUGIN' == 'com.android.application') { applicationId '$PKG_NAME' }
-                minSdkVersion 21
-                targetSdkVersion 33
-                versionCode 1
-                versionName '1.0'
-                manifestPlaceholders = [applicationId: '$PKG_NAME']
-            }
-            aaptOptions { namespaced = false }
-            lintOptions { abortOnError false }
-        }
-        dependencies {
-            implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
-EOF
-          # 尝试追加原有的外部库依赖，但跳过 project() 依赖以防循环引用
-          if grep -q "dependencies {" "$file"; then
-             grep "implementation" "$file" | grep -v "project(" >> "${file}.tmp" || true
-          fi
-          echo "}" >> "${file}.tmp"
+          # 使用 printf 构建以确保换行和缩进安全
+          printf "apply plugin: '$PLUGIN'\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n" > "${file}.tmp"
+          [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "${file}.tmp"
+          printf "        minSdkVersion 21\n        targetSdkVersion 33\n        versionCode 1\n        versionName '1.0'\n        manifestPlaceholders = [applicationId: 'com.termux']\n    }\n    aaptOptions { namespaced = false }\n    lintOptions { abortOnError false }\n}\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "${file}.tmp"
+          
+          # 恢复原始 implementation 依赖
+          grep "implementation" "$file" | grep -v "project(" >> "${file}.tmp" || true
+          printf "}\n" >> "${file}.tmp"
           mv "${file}.tmp" "$file"
         done
 
