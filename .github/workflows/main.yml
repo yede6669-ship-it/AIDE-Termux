@@ -1,4 +1,4 @@
-name: Android CI (Multi-Module Build Fix)
+name: Android CI (Final Multi-Module Fix)
 
 on:
   push:
@@ -18,7 +18,7 @@ jobs:
       with:
         fetch-depth: 0
 
-    # 1. 准备环境：Java 17 用于工具链，Java 11 用于编译
+    # 1. 环境准备
     - name: Set up Java 17
       uses: actions/setup-java@v4
       with:
@@ -36,38 +36,40 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
 
-    # 2. 注入全局工程配置 (彻底解决版本倒挂和依赖问题)
-    - name: Inject Project Infrastructure
+    # 2. 注入全局配置并自动修复旧语法
+    - name: Inject Project Infrastructure & Fix Legacy Syntax
       run: |
-        # 强制生成根目录 build.gradle：这是解决 "Required Gradle 2.2" 报错的关键
+        # 创建根目录 build.gradle，强制统一插件版本
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
-            dependencies { 
-                classpath 'com.android.tools.build:gradle:7.4.2' 
-            }
+            dependencies { classpath 'com.android.tools.build:gradle:7.4.2' }
         }
         allprojects {
             repositories { google(); mavenCentral() }
         }
         EOF
 
-        # 强制生成全局 gradle.properties
+        # 强制生成全局配置
         cat <<'EOF' > gradle.properties
         android.useAndroidX=true
         android.enableJetifier=true
         android.suppressUnsupportedCompileSdk=31
         EOF
 
-        # 强制生成全局 settings.gradle (确保所有文件夹被正确识别为模块)
+        # 强制生成全局模块包含声明
         cat <<'EOF' > settings.gradle
-        include ':app'
-        include ':terminal-emulator'
-        include ':terminal-view'
-        include ':termux-shared'
+        include ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'
         EOF
 
-        # 强制重写主 app 模块的编译逻辑
+        # --- 核心步骤：自动手术修复旧语法 ---
+        # 遍历所有 build.gradle，把古老的 'compile' 换成现代的 'implementation'
+        # 同时把 'testCompile' 换成 'testImplementation'
+        echo "Updating legacy Gradle syntax..."
+        find . -name "build.gradle" -exec sed -i 's/\bcompile\b/implementation/g' {} +
+        find . -name "build.gradle" -exec sed -i 's/testCompile/testImplementation/g' {} +
+
+        # 3. 强制重写主 app 模块配置，确保关联和 JNI 路径正确
         mkdir -p app
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
@@ -84,12 +86,12 @@ jobs:
             }
             sourceSets {
                 main {
-                    // 指向你仓库中存放 .so 文件的真实位置
+                    // 指向你存放 .so 文件的目录
                     jniLibs.srcDirs = ['src/main/jniLibs']
                 }
             }
             packagingOptions {
-                // 核心：保护 Termux 的二进制库不被 strip 损坏
+                // 关键：防止 Termux 二进制文件被损坏
                 doNotStrip "**/libtermux-bootstrap.so"
                 doNotStrip "**/libproot.so"
                 doNotStrip "**/libLoader.so"
@@ -99,7 +101,6 @@ jobs:
             }
         }
         dependencies {
-            // 联动其他模块
             implementation project(':terminal-emulator')
             implementation project(':terminal-view')
             implementation project(':termux-shared')
@@ -108,7 +109,7 @@ jobs:
         }
         EOF
 
-    # 3. 配置 Gradle
+    # 3. 设置 Gradle 7.5
     - name: Setup Gradle 7.5
       uses: gradle/actions/setup-gradle@v3
       with:
@@ -121,7 +122,7 @@ jobs:
         export JAVA_HOME=$JAVA_HOME_11_X64
         export PATH=$JAVA_HOME/bin:$PATH
         
-        # 优先使用项目自带的 gradlew，若无则使用全局 gradle
+        # 自动选择 gradlew 或全局 gradle
         if [ -f "./gradlew" ]; then
           chmod +x gradlew
           ./gradlew :app:assembleDebug --no-daemon --stacktrace
@@ -129,10 +130,10 @@ jobs:
           gradle :app:assembleDebug --no-daemon --stacktrace
         fi
 
-    # 5. 上传最终产物
-    - name: Upload Final APK
+    # 5. 上传产物
+    - name: Upload Success APK
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-AIDE-Successful-Build
+        name: Termux-AIDE-Fixed-Build
         path: "app/build/outputs/apk/debug/*.apk"
