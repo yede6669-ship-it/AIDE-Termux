@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 env:
+  # 强制使用 Node 24 解决弃用警告
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -17,7 +18,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        fetch-depth: 0 # 获取完整历史，防止某些脚本依赖 git tags
+        fetch-depth: 0
 
     - name: Set up JDK 17
       uses: actions/setup-java@v4
@@ -29,27 +30,29 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Check Files Location
-      # 这一步能帮你看到 gradlew 到底在哪
+    - name: Install NDK
       run: |
-        echo "当前目录内容:"
-        ls -R | grep gradlew || echo "⚠️ 没找到 gradlew 文件！"
+        # 安装 il2Fusion 推荐的 NDK 版本
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
 
-    - name: Build with Gradle
-      # 使用 find 找到 gradlew 并执行，防止它不在根目录
+    - name: Restore or Generate Gradle Wrapper
       run: |
-        GRADLEW_PATH=$(find . -name gradlew | head -n 1)
-        if [ -z "$GRADLEW_PATH" ]; then
-          echo "错误: 项目中找不到 gradlew，请检查仓库结构。"
-          exit 1
+        # 核心修复：如果找不到 gradlew，就地生成一个
+        if [ ! -f "gradlew" ]; then
+          echo "⚠️ 仓库中缺失 gradlew，正在自动生成构建环境..."
+          gradle wrapper --gradle-version 8.5
         fi
-        chmod +x "$GRADLEW_PATH"
-        $GRADLEW_PATH assembleRelease --stacktrace --no-daemon
+        chmod +x gradlew
 
-    - name: Upload Artifacts
+    - name: Build Release Binaries
+      # --stacktrace 方便报错时查看具体原因
+      # --no-daemon 节省 CI 内存
+      run: ./gradlew assembleRelease --stacktrace --no-daemon
+
+    - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: il2Fusion-Binaries
+        name: il2Fusion-Release-Package
         path: |
           **/build/outputs/apk/release/*.apk
           **/build/outputs/zygisk/*.zip
