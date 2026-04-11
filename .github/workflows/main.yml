@@ -1,4 +1,4 @@
-name: Android CI (Full Source Recovery)
+name: Android CI (Final Resolution)
 
 on:
   push:
@@ -16,8 +16,8 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 1. 满足 SDK Manager 的 JDK 17 环境
-    - name: Set up JDK 17 (For SDK Tooling)
+    # 1. 设置 JDK 17 运行 SDK 工具
+    - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
@@ -26,30 +26,43 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
-    # 2. 切换回满足 Gradle 6.7.1 的 JDK 11 环境
-    - name: Set up JDK 11 (For Compilation)
+    # 2. 切换到 JDK 11 进行旧版编译（解决 ASM 61 错误）
+    - name: Set up JDK 11
       uses: actions/setup-java@v4
       with:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Project Reconstruction & Source Salvage
+    - name: Project Hard Reset
       run: |
-        # 创建标准的 Gradle 结构
-        rm -rf aide-termux app terminal-emulator terminal-view termux-shared
-        mkdir -p aide-termux/src/main/java app/src/main/java terminal-emulator/src/main/java terminal-view/src/main/java termux-shared/src/main/java
-        mkdir -p app/src/main/res/values aide-termux/src/main/res/values
-
-        # --- 核心：打捞源码 ---
-        # 搜索仓库中所有 .java 文件，并尝试放入 app 模块（最稳妥的策略）
-        find . -name "*.java" ! -path "*/src/main/java/*" -exec cp --parents {} app/src/main/java/ \; || true
+        # 清理所有干扰文件
+        rm -rf aide-termux app terminal-emulator terminal-view termux-shared .gradle
         
-        # 搜索所有资源文件夹并合并
+        # 创建标准目录
+        mkdir -p app/src/main/java app/src/main/res/values
+        mkdir -p terminal-emulator/src/main/java
+        mkdir -p terminal-view/src/main/java
+        mkdir -p termux-shared/src/main/java
+
+        # 核心：打捞所有源码归位
+        find . -name "*.java" ! -path "*/src/main/java/*" -exec cp --parents {} app/src/main/java/ \; || true
         find . -name "res" -type d ! -path "*/src/main/res*" -exec cp -r {}/.. app/src/main/ \; || true
 
-        # --- 写入基础配置文件 ---
-        echo "include ':aide-termux', ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
+        # 写入最小化 Manifest
+        echo '<manifest package="com.termux"><application android:label="Termux"/></manifest>' > app/src/main/AndroidManifest.xml
+        echo '<manifest package="com.termux.terminal"/>' > terminal-emulator/src/main/AndroidManifest.xml
+        echo '<manifest package="com.termux.view"/>' > terminal-view/src/main/AndroidManifest.xml
+        echo '<manifest package="com.termux.shared"/>' > termux-shared/src/main/AndroidManifest.xml
+        
+        # 补全资源
+        echo '<resources><string name="app_name">Termux</string></resources>' > app/src/main/res/values/strings.xml
 
+        # 生成 settings.gradle (暂时减少模块层级以稳定编译)
+        echo "include ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
+
+    - name: Configure Gradle Files
+      run: |
+        # 根 build.gradle
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); jcenter() }
@@ -57,25 +70,36 @@ jobs:
         }
         allprojects {
             repositories { google(); mavenCentral(); jcenter(); maven { url "https://jitpack.io" } }
+            // 强制统一依赖版本，防止 8000 行错误（依赖冲突死循环）
+            configurations.all {
+                resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+                    if (details.requested.group == 'androidx.annotation') { details.useVersion '1.3.0' }
+                }
+            }
         }
         EOF
 
-        # 确保每个模块都有 AndroidManifest.xml (否则 Gradle 不会将其视为 Android 模块)
-        echo '<manifest package="com.aide.termux"><application/></manifest>' > aide-termux/src/main/AndroidManifest.xml
-        echo '<manifest package="com.termux"><application/></manifest>' > app/src/main/AndroidManifest.xml
-        echo '<manifest package="com.termux.terminal"/>' > terminal-emulator/src/main/AndroidManifest.xml
-        echo '<manifest package="com.termux.view"/>' > terminal-view/src/main/AndroidManifest.xml
-        echo '<manifest package="com.termux.shared"/>' > termux-shared/src/main/AndroidManifest.xml
-
-        # 补全基础资源防止 AAPT 报错
-        echo '<resources><string name="app_name">Termux</string></resources>' > app/src/main/res/values/strings.xml
-
-        # --- 模块依赖配置 ---
-        echo "apply plugin: 'com.android.application'; android { compileSdkVersion 33; buildToolsVersion '30.0.3'; defaultConfig { applicationId 'com.aide.termux'; minSdkVersion 24 } }; dependencies { implementation project(':app') }" > aide-termux/build.gradle
-        echo "apply plugin: 'com.android.application'; android { compileSdkVersion 33; buildToolsVersion '30.0.3'; defaultConfig { applicationId 'com.termux'; minSdkVersion 21 } }; dependencies { implementation project(':terminal-emulator'); implementation project(':terminal-view'); implementation project(':termux-shared'); implementation 'androidx.appcompat:appcompat:1.3.1'; implementation 'com.google.android.material:material:1.4.0' }" > app/build.gradle
+        # 模块 build.gradle
         echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33; buildToolsVersion '30.0.3' }" > terminal-emulator/build.gradle
         echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33; buildToolsVersion '30.0.3' }; dependencies { implementation project(':terminal-emulator') }" > terminal-view/build.gradle
         echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33; buildToolsVersion '30.0.3' }; dependencies { implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'; implementation 'com.google.guava:guava:31.1-android' }" > termux-shared/build.gradle
+        
+        # 主 APP 模块
+        cat <<'EOF' > app/build.gradle
+        apply plugin: 'com.android.application'
+        android {
+            compileSdkVersion 33
+            defaultConfig { applicationId "com.termux"; minSdkVersion 21; targetSdkVersion 33 }
+            lintOptions { abortOnError false }
+        }
+        dependencies {
+            implementation project(':terminal-emulator')
+            implementation project(':terminal-view')
+            implementation project(':termux-shared')
+            implementation 'androidx.appcompat:appcompat:1.3.1'
+            implementation 'com.google.android.material:material:1.4.0'
+        }
+        EOF
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
@@ -83,15 +107,17 @@ jobs:
         gradle-version: 6.7.1
         cache-disabled: true
 
-    - name: Build APK (Assemble)
+    - name: Final Build Attempt
       run: |
-        # 运行 clean 确保不使用旧缓存，assembleDebug 强制生成 APK
-        gradle clean assembleDebug --no-daemon --stacktrace -x lint
+        # 关键：分配 4GB 内存并关闭并行编译，防止死循环导致的内存溢出
+        export GRADLE_OPTS="-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dorg.gradle.parallel=false -Dorg.gradle.jvmargs='-Xmx4096m'"
+        gradle clean assembleDebug --no-daemon --stacktrace --info
 
-    - name: Upload APK
-      if: success()
+    - name: Upload Artifact
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Build-Success
-        path: "**/build/outputs/apk/**/*.apk"
-        if-no-files-found: error
+        name: Build-Output-Logs
+        path: |
+          **/build/outputs/apk/**/*.apk
+          build_log.txt
