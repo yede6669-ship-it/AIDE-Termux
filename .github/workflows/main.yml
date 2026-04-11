@@ -1,17 +1,24 @@
-name: Android CI (Multi-Module Full Fix)
+name: Android CI (Multi-Module Full Success)
 
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # 获取完整历史
 
+    # 1. 设置 Java 17 以支持最新的 Android SDK 工具
     - name: Set up Java 17
       uses: actions/setup-java@v4
       with:
@@ -23,23 +30,24 @@ jobs:
       env:
         JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
 
-    - name: Set up Java 11 (For Build)
+    # 2. 设置 Java 11 用于 Gradle 编译 (保证多模块兼容性)
+    - name: Set up Java 11
       uses: actions/setup-java@v4
       with:
         java-version: '11'
         distribution: 'temurin'
 
-    # --- 关键修改：不再删除所有文件夹，只通过脚本修正配置 ---
-    - name: Inject Configuration
+    # 3. 自动修复和注入缺失的工程配置
+    - name: Inject Project Infrastructure
       run: |
-        # 1. 在根目录生成 gradle.properties
+        # 创建根目录配置 (开启 AndroidX 和 屏蔽 SDK 警告)
         cat <<'EOF' > gradle.properties
         android.useAndroidX=true
         android.enableJetifier=true
         android.suppressUnsupportedCompileSdk=31
         EOF
 
-        # 2. 修正根目录的 settings.gradle，确保包含所有模块
+        # 确保根目录 settings.gradle 包含所有子模块
         cat <<'EOF' > settings.gradle
         include ':app'
         include ':terminal-emulator'
@@ -47,9 +55,9 @@ jobs:
         include ':termux-shared'
         EOF
 
-        # 3. 修正 app 模块的 build.gradle，确保它能找到 jniLibs
-        # 注意：这里我们直接用 sed 或者重写 app/build.gradle
-        # 为了保险，我们重写一个适配你结构的 app/build.gradle
+        # 核心：重写 app 模块的 build.gradle 确保 JNI 库和多模块关联正确
+        # 注意：这里保留了你提到的 .so 库不被 strip 压缩损坏
+        mkdir -p app
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -59,17 +67,25 @@ jobs:
                 applicationId "com.termux"
                 minSdk 21
                 targetSdk 31
+                versionCode 1
+                versionName "1.0"
                 ndk { abiFilters 'arm64-v8a' }
             }
             sourceSets {
                 main {
+                    // 确保指向你仓库中真实的 jniLibs 路径
                     jniLibs.srcDirs = ['src/main/jniLibs']
                 }
             }
             packagingOptions {
+                // 关键：防止 Termux 的核心二进制库被损坏
                 doNotStrip "**/libtermux-bootstrap.so"
                 doNotStrip "**/libproot.so"
                 doNotStrip "**/libLoader.so"
+                // 移除重复的资源文件
+                resources {
+                    excludes += '/META-INF/{AL2.0,LGPL2.1}'
+                }
             }
         }
         dependencies {
@@ -77,23 +93,36 @@ jobs:
             implementation project(':terminal-view')
             implementation project(':termux-shared')
             implementation 'androidx.appcompat:appcompat:1.3.1'
+            implementation 'com.google.android.material:material:1.4.0'
         }
         EOF
 
+    # 4. 设置 Gradle 环境
     - name: Setup Gradle 7.5
       uses: gradle/actions/setup-gradle@v3
       with:
         gradle-version: 7.5
+        cache-disabled: true # 避开 GitHub 缓存服务器不稳定的问题
 
+    # 5. 执行编译
     - name: Build APK
       run: |
+        # 强制使用 Java 11 编译
         export JAVA_HOME=$JAVA_HOME_11_X64
         export PATH=$JAVA_HOME/bin:$PATH
-        # 使用 assembleDebug 编译 app 模块
-        ./gradlew :app:assembleDebug --stacktrace
+        
+        # 检查并赋予 gradlew 执行权限，如果不存在则直接使用全局 gradle
+        if [ -f "./gradlew" ]; then
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+        else
+          gradle :app:assembleDebug --no-daemon --stacktrace
+        fi
 
-    - name: Upload APK
+    # 6. 上传产物
+    - name: Upload Final APK
+      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-MultiModule-APK
+        name: Termux-AIDE-Build
         path: "app/build/outputs/apk/debug/*.apk"
