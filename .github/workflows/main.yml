@@ -1,4 +1,4 @@
-name: Android CI (Final Polish)
+name: Android CI (Guava & Annotation Fix)
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Precise Code Surgery
+    - name: High-Intensity Code Fix
       run: |
         # 1. 模块归位
         for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
@@ -33,22 +33,22 @@ jobs:
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 修正 R 类和 BuildConfig (namespace 为 com.termux)
+        # 2. 全面修复 R 类、BuildConfig 和 Log
+        # 将所有可能的 R 类引用指向 com.termux.R
         find . -name "*.java" -exec sed -i 's/import com.termux.shared.R;/import com.termux.R;/g' {} +
         find . -name "*.java" -exec sed -i 's/import com.termux.view.R;/import com.termux.R;/g' {} +
         find . -name "*.java" -exec sed -i 's/com.termux.shared.R./com.termux.R./g' {} +
         find . -name "*.java" -exec sed -i 's/com.termux.view.R./com.termux.R./g' {} +
-        # 统一指向 com.termux.BuildConfig
+        
+        # 统一 BuildConfig
+        find . -name "*.java" -exec sed -i 's/import com.termux.BuildConfig;/import com.termux.BuildConfig;/g' {} +
         find . -name "*.java" -exec sed -i 's/import com.termux.app.BuildConfig;/import com.termux.BuildConfig;/g' {} +
-        find . -name "*.java" -exec sed -i 's/import com.termux.shared.BuildConfig;/import com.termux.BuildConfig;/g' {} +
-
-        # 3. 修复 Log 兼容性问题
-        # 将第三方 Log 替换为原生，但要特殊处理单参数的情况
+        
+        # 修复 Log 和单参数 Log.d
         find . -name "*.java" -exec sed -i 's/io.github.zeroaicy.util.Log/android.util.Log/g' {} +
-        # 针对报错的那行 Log.d("...") 进行修复，强行加上一个 TAG
         find . -name "*.java" -exec sed -i 's/Log.d("/Log.d("Termux", "/g' {} +
 
-        # 4. 资源去重
+        # 3. 资源去重 (保留 values)
         find termux-shared/src/main/res/ -type f | while read file; do
             filename=$(basename "$file")
             dirname=$(basename $(dirname "$file"))
@@ -57,7 +57,7 @@ jobs:
             fi
         done
 
-        # 5. 构建配置
+        # 4. 构建配置
         echo "include ':app', ':terminal-emulator'" > settings.gradle
         cat <<'EOF' > build.gradle
         buildscript {
@@ -69,7 +69,7 @@ jobs:
         }
         EOF
 
-        # 6. 独立模块 terminal-emulator
+        # 5. 独立模块 terminal-emulator
         cat <<'EOF' > terminal-emulator/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -80,7 +80,7 @@ jobs:
         dependencies { implementation 'androidx.annotation:annotation:1.7.0' }
         EOF
 
-        # 7. 主 App 配置 (增加 androidx.window)
+        # 6. 主 App 配置 (强化依赖链)
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -103,10 +103,18 @@ jobs:
         }
         dependencies {
             implementation project(':terminal-emulator')
+            
+            // 核心库
             implementation 'androidx.appcompat:appcompat:1.6.1'
             implementation 'com.google.android.material:material:1.11.0'
             implementation 'androidx.preference:preference:1.2.1'
-            implementation 'androidx.window:window:1.2.0'  // 修复 WindowMetrics 报错
+            implementation 'androidx.window:window:1.2.0'
+            
+            // 【关键修复】显式引入 Guava 及其注解支持
+            implementation 'com.google.guava:guava:33.0.0-android'
+            implementation 'com.google.code.findbugs:jsr305:3.0.2'
+            
+            // 其他工具库
             implementation 'commons-io:commons-io:2.15.1'
             implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'
             implementation 'io.noties.markwon:core:4.6.2'
