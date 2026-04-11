@@ -1,9 +1,15 @@
-name: Android CI (Precise Reconstruction)
+name: Android CI (Termux Precise Build)
 
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
+
+env:
+  # 强制使用 JDK 17 以适配最新的 Android SDK 工具
+  JAVA_VERSION: '17'
+  # 禁用 Gradle 守护进程以节省 Actions 内存
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false"
 
 jobs:
   build:
@@ -15,63 +21,71 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up JDK 11
+    - name: Set up JDK ${{ env.JAVA_VERSION }}
       uses: actions/setup-java@v4
       with:
-        java-version: '11'
+        java-version: ${{ env.JAVA_VERSION }}
         distribution: 'temurin'
 
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Organize Project Files
+    - name: Project Reconstruction (Precise Mapping)
       run: |
-        # 创建目录结构
+        # 1. 创建符合 Gradle 规范的文件夹结构
         mkdir -p aide-termux/src/main app/src/main terminal-emulator/src/main terminal-view/src/main termux-shared/src/main
         
-        # 1. 映射 AndroidManifest
-        [ -f "AndroidManifest.xml" ] && cp "AndroidManifest.xml" "aide-termux/src/main/AndroidManifest.xml"
-        [ -f "AndroidManifest (1).xml" ] && cp "AndroidManifest (1).xml" "app/src/main/AndroidManifest.xml"
-        [ -f "AndroidManifest (2).xml" ] && cp "AndroidManifest (2).xml" "terminal-emulator/src/main/AndroidManifest.xml"
-        [ -f "AndroidManifest (3).xml" ] && cp "AndroidManifest (3).xml" "terminal-view/src/main/AndroidManifest.xml"
-        [ -f "AndroidManifest (4).xml" ] && cp "AndroidManifest (4).xml" "termux-shared/src/main/AndroidManifest.xml"
+        # 2. 物理归位 AndroidManifest (根据文件内容身份还原)
+        # AndroidManifest.xml -> aide-termux (启动入口)
+        # AndroidManifest (1).xml -> app (主权限定义)
+        # AndroidManifest (2).xml -> terminal-emulator
+        # AndroidManifest (3).xml -> terminal-view
+        # AndroidManifest (4).xml -> termux-shared
+        
+        cp "AndroidManifest.xml"     "aide-termux/src/main/AndroidManifest.xml"
+        cp "AndroidManifest (1).xml" "app/src/main/AndroidManifest.xml"
+        cp "AndroidManifest (2).xml" "terminal-emulator/src/main/AndroidManifest.xml"
+        cp "AndroidManifest (3).xml" "terminal-view/src/main/AndroidManifest.xml"
+        cp "AndroidManifest (4).xml" "termux-shared/src/main/AndroidManifest.xml"
 
-        # 2. 映射并修复 build.gradle (将 compile 替换为 implementation)
-        fix_gradle() {
+        # 3. 物理归位 build.gradle 并修复旧语法
+        # 你的文件中使用了 'compile'，这在现代 Gradle 中已废弃，需替换为 'implementation'
+        
+        process_gradle() {
           sed -i 's/compile /implementation /g' "$1"
           sed -i 's/api /implementation /g' "$1"
-          # 确保支持 AndroidX
-          echo "android.useAndroidX=true" >> gradle.properties
-          echo "android.enableJetifier=true" >> gradle.properties
+          sed -i 's/compileOnly /compileOnly /g' "$1" # 保持 compileOnly
         }
 
-        [ -f "build.gradle" ] && cp "build.gradle" "aide-termux/build.gradle" && fix_gradle "aide-termux/build.gradle"
-        [ -f "build (1).gradle" ] && cp "build (1).gradle" "app/build.gradle" && fix_gradle "app/build.gradle"
-        [ -f "build (2).gradle" ] && cp "build (2).gradle" "terminal-emulator/build.gradle" && fix_gradle "terminal-emulator/build.gradle"
-        [ -f "build (3).gradle" ] && cp "build (3).gradle" "terminal-view/build.gradle" && fix_gradle "terminal-view/build.gradle"
-        [ -f "build (4).gradle" ] && cp "build (4).gradle" "termux-shared/build.gradle" && fix_gradle "termux-shared/build.gradle"
+        cp "build.gradle"     "aide-termux/build.gradle" && process_gradle "aide-termux/build.gradle"
+        cp "build (1).gradle" "app/build.gradle"         && process_gradle "app/build.gradle"
+        cp "build (2).gradle" "terminal-emulator/build.gradle" && process_gradle "terminal-emulator/build.gradle"
+        cp "build (3).gradle" "terminal-view/build.gradle"     && process_gradle "terminal-view/build.gradle"
+        cp "build (4).gradle" "termux-shared/build.gradle"     && process_gradle "termux-shared/build.gradle"
 
-        # 3. 生成 settings.gradle
+        # 4. 生成根项目配置
         echo "include ':aide-termux', ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
-
-        # 4. 特殊修复：给 aide-termux 的清单补上 package，否则会报 8000 条错
-        if ! grep -q "package=" "aide-termux/src/main/AndroidManifest.xml"; then
-          sed -i 's/<manifest/<manifest package="com.aide.termux"/g' "aide-termux/src/main/AndroidManifest.xml"
-        fi
-        # 替换所有清单中的 ${applicationId} 占位符
+        
+        # 5. 修复主清单缺失 package 导致的 8000 条错误
+        # 确保每个 AndroidManifest 都有明确的 package 声明
+        sed -i 's/<manifest/<manifest package="com.aide.termux"/g' "aide-termux/src/main/AndroidManifest.xml"
+        
+        # 统一替换 ${applicationId} 占位符防止编译崩溃
         find . -name "AndroidManifest.xml" -exec sed -i 's/\${applicationId}/com.termux/g' {} +
 
     - name: Initialize Gradle Wrapper
       run: |
+        # 即使项目里没有 gradlew，我们也手动生成一个稳定的 6.7.1 版本
         gradle wrapper --gradle-version 6.7.1
         chmod +x gradlew
 
-    - name: Build APK
+    - name: Build Debug APK
       run: |
-        ./gradlew assembleDebug --no-daemon --stacktrace
+        # 使用 --project-cache-dir 避开 Actions 文件快照锁冲突
+        ./gradlew assembleDebug --stacktrace --project-cache-dir /tmp/gradle_cache
 
-    - name: Upload Artifacts
+    - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Package
+        name: AIDE-Termux-Build
         path: "**/build/outputs/apk/**/*.apk"
