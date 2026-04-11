@@ -1,4 +1,4 @@
-name: Android CI (Archaeology Hybrid)
+name: Android CI (Modern Compatibility)
 
 on:
   push:
@@ -18,53 +18,47 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up JDK 17 (For SDK Manager)
+    - name: Set up JDK 11
+      # 切换到 JDK 11，这是 Gradle 6.x 的最佳搭档
       uses: actions/setup-java@v4
       with:
-        java-version: '17'
+        java-version: '11'
         distribution: 'temurin'
 
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Set up JDK 8 (For Actual Compilation)
-      uses: actions/setup-java@v4
-      with:
-        java-version: '8'
-        distribution: 'temurin'
-        cache: gradle
-
-    - name: Force Inject Gradle 2.2 Wrapper
+    - name: Install NDK
       run: |
-        echo "🚀 正在注入 Gradle 2.2 引导程序..."
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
+
+    - name: Force Inject Gradle 6.7.1 Wrapper
+      # 放弃 2.2 考古版，改用能理解 buildFeatures 的现代版
+      run: |
+        echo "🚀 正在注入 Gradle 6.7.1..."
         mkdir -p gradle/wrapper
-        curl -L https://raw.githubusercontent.com/gradle/gradle/v2.2/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
-        printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-2.2-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
-        curl -L https://raw.githubusercontent.com/gradle/gradle/v2.2/gradlew -o gradlew
+        curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+        printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-6.7.1-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
+        curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Patch Legacy Build Scripts (Hardcore Fix)
+    - name: Patch Build Scripts
       run: |
-        # 1. 替换仓库地址
+        # 1. 修复仓库
         find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
-        find . -name "*.gradle" -type f -exec sed -i "s/google()/maven { url 'https:\/\/maven.google.com' }/g" {} +
+        find . -name "*.gradle" -type f -exec sed -i "s/google()/google()/g" {} +
         
-        # 2. 核心修复：删除 Gradle 2.2 不认识的现代语法模块
-        # 删除整个 buildFeatures 块
-        find . -name "*.gradle" -type f -exec sed -i '/buildFeatures {/,/}/d' {} +
-        # 删除 viewBinding 等现代配置（如果存在）
-        find . -name "*.gradle" -type f -exec sed -i 's/viewBinding true//g' {} +
-        find . -name "*.gradle" -type f -exec sed -i 's/dataBinding true//g' {} +
-        
-        # 3. 强制在根目录注入 Google 仓库
-        sed -i "6i \        maven { url 'https:\/\/maven.google.com' }" build.gradle
+        # 2. 如果插件版本太低，强制升级插件版本以匹配 Gradle 6.7
+        # 把 classpath 'com.android.tools.build:gradle:x.x.x' 换成 4.1.0
+        sed -i "s/classpath 'com.android.tools.build:gradle:.*'/classpath 'com.android.tools.build:gradle:4.1.0'/g" build.gradle
 
-    - name: Build with Gradle 2.2
-      run: ./gradlew assembleRelease --info --stacktrace
+    - name: Build with Gradle
+      run: ./gradlew assembleRelease --stacktrace --no-daemon
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Antique-Build
+        name: AIDE-Termux-Modern-Build
         path: |
+          **/build/outputs/apk/release/*.apk
           **/build/outputs/apk/*.apk
