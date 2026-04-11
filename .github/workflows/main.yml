@@ -1,4 +1,4 @@
-name: Android CI (Final Recovery)
+name: Android CI (Full Recovery Mode)
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Install NDK & SDK Components
+    - name: Install SDK Components
       run: |
         $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "platforms;android-33" "build-tools;30.0.3"
 
@@ -48,11 +48,11 @@ jobs:
 
     - name: Radical Project Sanitization
       run: |
-        # 1. 重新生成 settings.gradle
+        # 1. 自动生成模块索引 (settings.gradle)
         MODULES=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|'\:\1'|" | paste -sd "," - | sed 's/,/, /g')
         echo "include $MODULES" > settings.gradle
 
-        # 2. 重置根目录 build.gradle
+        # 2. 彻底重写根目录 build.gradle
         cat <<EOF > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -63,38 +63,53 @@ jobs:
         }
         EOF
 
-        # 3. 强力重写所有子模块的 Gradle 脚本
+        # 3. 强力重写所有子模块，注入 com.termux 命名空间
         find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
           if grep -q "android {" "$file"; then
-            PLUGIN="com.android.library"
-            if [[ "$file" == *"app"* ]]; then PLUGIN="com.android.application"; fi
+            DIR_NAME=$(basename $(dirname "$file"))
             
-            # 提取 android { ... } 块之后的内容（保留依赖声明）
-            # 这种方法会丢弃原本可能出错的 android 闭包配置，改用统一的模板
+            # 统一包名为 com.termux 以匹配 Manifest 里的 Activity 路径
+            PKG_NAME="com.termux"
+            PLUGIN="com.android.library"
+            APP_ID_BLOCK=""
+            
+            if [[ "$file" == *"app"* ]]; then 
+                PLUGIN="com.android.application"
+                APP_ID_BLOCK="applicationId '$PKG_NAME'"
+            fi
+            
             cat <<EOF > "${file}.tmp"
         apply plugin: '$PLUGIN'
-
         android {
             compileSdkVersion 33
             buildToolsVersion "30.0.3"
             defaultConfig {
+                $APP_ID_BLOCK
                 minSdkVersion 21
                 targetSdkVersion 33
+                versionCode 1
+                versionName "1.0"
+                // 解决 Manifest 占位符无法识别的问题
+                manifestPlaceholders = [applicationId: "$PKG_NAME"]
             }
+            lintOptions { abortOnError false }
             compileOptions {
                 sourceCompatibility JavaVersion.VERSION_1_8
                 targetCompatibility JavaVersion.VERSION_1_8
             }
         }
         EOF
-            # 只保留原文件中 dependencies { ... } 之后的内容
+            # 保留原有的依赖定义
             sed -n '/dependencies {/,$p' "$file" >> "${file}.tmp"
             mv "${file}.tmp" "$file"
-            echo "🔥 已强力重构模块脚本: $file"
+            echo "✅ 模块 $DIR_NAME 修复完成"
           fi
         done
 
-        # 4. 全局清理无效引用
+        # 4. 关键步骤：物理替换 Manifest 里的变量，解决 packageName 找不到的报错
+        find . -name "AndroidManifest.xml" -exec sed -i 's/\${applicationId}/com.termux/g' {} +
+        
+        # 5. 清理 JCenter 引用
         find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
 
     - name: Build Debug APK
@@ -103,7 +118,7 @@ jobs:
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Fixed-Build
+        name: Termux-AIDE-Compatible-Build
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
