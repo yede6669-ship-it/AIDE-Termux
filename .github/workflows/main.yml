@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 env:
+  # 强制使用 Node 24 解决弃用警告
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -18,10 +19,11 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up JDK 17
+    - name: Set up JDK 11
+      # 针对旧版 Gradle 插件，JDK 11 的兼容性比 17 更好
       uses: actions/setup-java@v4
       with:
-        java-version: '17'
+        java-version: '11'
         distribution: 'temurin'
         cache: gradle
 
@@ -32,29 +34,45 @@ jobs:
       run: |
         $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
 
-    - name: Fix Legacy Gradle Scripts
-      # 核心修复：自动把代码里死掉的 jcenter() 替换为安全的 mavenCentral()
+    - name: Force Inject Gradle Wrapper
+      # 绕过系统 Gradle 9.4，手动写入 7.5 版本的引导文件
       run: |
-        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
-        find . -name "*.gradle" -type f -exec sed -i 's/google()/google()/g' {} +
+        echo "🚀 正在强行注入兼容性构建引导 (Gradle 7.5)..."
+        mkdir -p gradle/wrapper
+        
+        # 下载官方引导 Jar
+        curl -L https://raw.githubusercontent.com/gradle/gradle/v7.5.0/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+        
+        # 写入配置文件
+        cat <<EOF > gradle/wrapper/gradle-wrapper.properties
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-7.5-bin.zip
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+EOF
 
-    - name: Restore Gradle Wrapper (Compatible Version)
-      # 核心修复：生成 Gradle 7.5，这个版本还认识旧的语法
-      run: |
-        if [ ! -f "gradlew" ]; then
-          echo "⚠️ 正在生成兼容版构建环境 (Gradle 7.5)..."
-          gradle wrapper --gradle-version 7.5
-        fi
+        # 下载并设置执行权限
+        curl -L https://raw.githubusercontent.com/gradle/gradle/v7.5.0/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Build Release Binaries
-      # 使用 --no-daemon 避免内存溢出
+    - name: Fix Legacy Gradle Scripts
+      # 核心修复：自动修复已经死掉的 jcenter() 仓库引用
+      run: |
+        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
+        # 如果项目极其古老，可能还需要处理 google() 仓库的顺序，这里先做基础替换
+        find . -name "*.gradle" -type f -exec sed -i 's/google()/google()/g' {} +
+
+    - name: Build with Gradle
+      # 使用注入的 gradlew 运行任务
+      # --no-daemon 适合 CI，防止内存泄漏导致的 Exit 1
       run: ./gradlew assembleRelease --stacktrace --no-daemon
 
     - name: Upload Artifacts
+      # 自动扫描所有模块生成的产物并打包上传
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Release
+        name: AIDE-Termux-Package
         path: |
           **/build/outputs/apk/release/*.apk
           **/build/outputs/zygisk/*.zip
