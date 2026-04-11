@@ -46,7 +46,7 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Reconstruction of Project Structure
+    - name: Heavy Duty Script Patching
       run: |
         # 1. 彻底重写根目录 build.gradle
         cat <<EOF > build.gradle
@@ -59,21 +59,24 @@ jobs:
         }
         EOF
 
-        # 2. 强力修复 app/build.gradle
-        # 我们先把文件里的 buildFeatures 等现代垃圾清理干净
-        sed -i '/buildFeatures/,/}/d' app/build.gradle
-        sed -i 's/jcenter()/mavenCentral()/g' app/build.gradle
+        # 2. 核心语法清洗 app/build.gradle
+        # 修复 JavaVersion.VERSION_8 -> JavaVersion.VERSION_1_8
+        sed -i 's/JavaVersion.VERSION_8/JavaVersion.VERSION_1_8/g' app/build.gradle
         
-        # 3. 核心手术：确保文件开头是插件应用，且修复 android {} 块的识别问题
-        # 先创建一个临时的头部
+        # 修复 sourceCompatibility/targetCompatibility 的写法
+        sed -i 's/sourceCompatibility VERSION_1_8/sourceCompatibility JavaVersion.VERSION_1_8/g' app/build.gradle
+        sed -i 's/targetCompatibility VERSION_1_8/targetCompatibility JavaVersion.VERSION_1_8/g' app/build.gradle
+
+        # 清除 buildFeatures 块
+        sed -i '/buildFeatures/,/}/d' app/build.gradle
+        
+        # 3. 插件头部强制对齐
         echo "apply plugin: 'com.android.application'" > app/build.gradle.new
-        # 过滤掉原文件中可能存在的冲突插件声明，追加剩余内容
         grep -v "apply plugin" app/build.gradle >> app/build.gradle.new
         mv app/build.gradle.new app/build.gradle
 
     - name: Build Release APK
-      # 使用 --info 看到底哪个任务卡住了
-      # 使用 -P 强制跳过可能出错的 Lint 检查
+      # 加上 --no-daemon 避免内存抖动，跳过 lint 保证速度
       run: ./gradlew :app:assembleRelease -x lint --stacktrace --no-daemon
 
     - name: Upload Artifacts
