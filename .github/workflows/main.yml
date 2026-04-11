@@ -1,4 +1,4 @@
-name: Android CI (Full Code Link)
+name: Android CI (Atomic Fix v2)
 
 on:
   push:
@@ -54,17 +54,23 @@ jobs:
         find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
           MOD_DIR=$(dirname "$file")
           MOD_NAME=$(basename "$MOD_DIR")
-          mkdir -p "$MOD_DIR/src/main"
+          TARGET_M_DIR="$MOD_DIR/src/main"
+          TARGET_M_PATH="$TARGET_M_DIR/AndroidManifest.xml"
           
-          # 修复 Manifest
+          mkdir -p "$TARGET_M_DIR"
+          
+          # 修复 cp 同文件报错：增加相同路径校验
           REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
-          [ -n "$REAL_M" ] && cp "$REAL_M" "$MOD_DIR/src/main/AndroidManifest.xml"
-          MPATH="$MOD_DIR/src/main/AndroidManifest.xml"
-          if [ ! -f "$MPATH" ]; then
-            echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux.'$MOD_NAME'" />' > "$MPATH"
+          if [ -n "$REAL_M" ] && [ "$(realpath "$REAL_M")" != "$(realpath "$TARGET_M_PATH" 2>/dev/null)" ]; then
+             cp "$REAL_M" "$TARGET_M_PATH"
+          fi
+
+          # 修复 Manifest 内容
+          if [ ! -f "$TARGET_M_PATH" ]; then
+            echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux.'${MOD_NAME//-/_}'" />' > "$TARGET_M_PATH"
           else
-            sed -i 's/\${applicationId}/com.termux/g' "$MPATH"
-            grep -q "package=" "$MPATH" || sed -i 's/<manifest/<manifest package="com.termux.'$MOD_NAME'"/g' "$MPATH"
+            sed -i 's/\${applicationId}/com.termux/g' "$TARGET_M_PATH"
+            grep -q "package=" "$TARGET_M_PATH" || sed -i 's/<manifest/<manifest package="com.termux.'${MOD_NAME//-/_}'"/g' "$TARGET_M_PATH"
           fi
 
           # 4. 重新构建 build.gradle
@@ -74,26 +80,24 @@ jobs:
           printf "apply plugin: '$PLUGIN'\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n" > "${file}.tmp"
           [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "${file}.tmp"
           printf "        minSdkVersion 21\n        targetSdkVersion 33\n        versionCode 1\n        versionName '1.0'\n        manifestPlaceholders = [applicationId: 'com.termux']\n    }\n" >> "${file}.tmp"
-          # 关键：启用资源合并和老旧代码支持
-          printf "    lintOptions { abortOnError false }\n    dexOptions { preDexLibraries false }\n    packagingOptions { pickFirst 'lib/*/libtermux.so' }\n}\n" >> "${file}.tmp"
+          printf "    lintOptions { abortOnError false }\n    packagingOptions { pickFirst 'lib/*/libtermux.so'; pickFirst '**/libc++_shared.so' }\n}\n" >> "${file}.tmp"
           
-          # 5. 恢复所有依赖（包括 project 依赖）
+          # 5. 恢复依赖
           printf "dependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "${file}.tmp"
           if grep -q "dependencies {" "$file"; then
-             # 提取 implementation/api/compile 并清理格式
              grep -E "implementation|api|compile" "$file" | grep -v "fileTree" >> "${file}.tmp" || true
           fi
           printf "}\n" >> "${file}.tmp"
           mv "${file}.tmp" "$file"
         done
 
-    - name: Build and Debug
-      run: ./gradlew assembleDebug --no-daemon --stacktrace || ./gradlew assembleDebug --no-daemon --stacktrace --info
+    - name: Build APK
+      run: ./gradlew assembleDebug --no-daemon --stacktrace
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Full-Build
+        name: Termux-Fixed-Build
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
