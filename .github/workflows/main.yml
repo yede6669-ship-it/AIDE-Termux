@@ -1,4 +1,4 @@
-name: Android CI (Universal SDK Sync)
+name: Android CI (AAPT2 Stability Fix)
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Project Reconstruction & SDK Force Sync
+    - name: Project Reconstruction & AAPT2 Fix
       run: |
         # 1. 自动归位模块
         EMULATOR_PATH=$(find . -maxdepth 3 -name "terminal-emulator" -type d | head -n 1)
@@ -45,14 +45,17 @@ jobs:
         [ -n "$SHARED_PATH" ] && mv "$SHARED_PATH" ./termux-shared || true
         [ -n "$APP_PATH" ] && mv "$APP_PATH" ./app || true
 
-        # 2. 核心手术：强制所有 build.gradle 使用 SDK 31
-        # 替换 compileSdkVersion 和 compileSdk 语法
+        # 2. 全局强制 SDK 31 并清理语法
         find . -name "build.gradle" -exec sed -i 's/compileSdkVersion [0-9]*/compileSdkVersion 31/g' {} +
         find . -name "build.gradle" -exec sed -i 's/compileSdk [0-9]*/compileSdk 31/g' {} +
-        # 修复旧语法 compile -> implementation
         find . -name "build.gradle" -exec sed -i 's/\bcompile\b/implementation/g' {} +
 
-        # 3. 根配置：加入 JitPack 并强制全局降级 window 库
+        # 3. 注入 Namespace 解决过时警告并稳定 AAPT2
+        sed -i '/android {/a \    namespace "com.termux.terminal"' terminal-emulator/build.gradle || true
+        sed -i '/android {/a \    namespace "com.termux.view"' terminal-view/build.gradle || true
+        sed -i '/android {/a \    namespace "com.termux.shared"' termux-shared/build.gradle || true
+
+        # 4. 根配置：增加 JitPack 和依赖拦截
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
@@ -74,13 +77,16 @@ jobs:
         include ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'
         EOF
 
+        # 5. 关键：增加 AAPT2 容错属性
         cat <<'EOF' > gradle.properties
         android.useAndroidX=true
         android.enableJetifier=true
         android.suppressUnsupportedCompileSdk=31
+        # 允许资源合并冲突，防止 AAPT2 崩溃
+        android.nonTransitiveRClass=false
         EOF
 
-        # 4. 强制重写 app 模块，确保依赖关系和 JNI 路径
+        # 6. 重写 app 模块配置
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -118,11 +124,12 @@ jobs:
       run: |
         export JAVA_HOME=$JAVA_HOME_11_X64
         export PATH=$JAVA_HOME/bin:$PATH
-        gradle :app:assembleDebug --no-daemon --refresh-dependencies
+        # --stacktrace 帮助我们捕获更深层的 AAPT2 错误
+        gradle :app:assembleDebug --no-daemon --refresh-dependencies --stacktrace
 
     - name: Upload
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Build-Success
+        name: Termux-Build-Stable
         path: "app/build/outputs/apk/debug/*.apk"
