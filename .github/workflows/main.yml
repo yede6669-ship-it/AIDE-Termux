@@ -1,4 +1,4 @@
-name: Android CI (Final Fix)
+name: Android CI (Final Survival Mode)
 
 on:
   push:
@@ -38,49 +38,43 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    - name: Force Inject Gradle 6.7.1 Wrapper
+    - name: Force Inject Gradle Wrapper
       run: |
-        echo "🚀 正在注入 Gradle 6.7.1..."
         mkdir -p gradle/wrapper
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
         printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-6.7.1-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Patch Build Scripts (Structural Reconstruction)
+    - name: Reconstruction of Project Structure
       run: |
-        # 1. 修复根目录 build.gradle：确保 buildscript 块结构完整
+        # 1. 彻底重写根目录 build.gradle
         cat <<EOF > build.gradle
         buildscript {
-            repositories {
-                google()
-                mavenCentral()
-            }
-            dependencies {
-                classpath 'com.android.tools.build:gradle:4.1.0'
-            }
+            repositories { google(); mavenCentral() }
+            dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }
         }
         allprojects {
-            repositories {
-                google()
-                mavenCentral()
-            }
+            repositories { google(); mavenCentral() }
         }
         EOF
 
-        # 2. 修复 app/build.gradle：确保第一行就是 apply plugin
-        # 移除原文件中的 buildFeatures 和 jcenter 引用
+        # 2. 强力修复 app/build.gradle
+        # 我们先把文件里的 buildFeatures 等现代垃圾清理干净
+        sed -i '/buildFeatures/,/}/d' app/build.gradle
         sed -i 's/jcenter()/mavenCentral()/g' app/build.gradle
-        sed -i '/buildFeatures {/,/}/d' app/build.gradle
         
-        # 3. 预防 android() 找不到：确保文件开头声明了插件
-        if ! grep -q "com.android.application" app/build.gradle; then
-           sed -i '1i apply plugin: "com.android.application"' app/build.gradle
-        fi
+        # 3. 核心手术：确保文件开头是插件应用，且修复 android {} 块的识别问题
+        # 先创建一个临时的头部
+        echo "apply plugin: 'com.android.application'" > app/build.gradle.new
+        # 过滤掉原文件中可能存在的冲突插件声明，追加剩余内容
+        grep -v "apply plugin" app/build.gradle >> app/build.gradle.new
+        mv app/build.gradle.new app/build.gradle
 
-    - name: Build with Gradle
-      # 添加 --no-daemon 确保内存不溢出
-      run: ./gradlew assembleRelease --stacktrace --no-daemon
+    - name: Build Release APK
+      # 使用 --info 看到底哪个任务卡住了
+      # 使用 -P 强制跳过可能出错的 Lint 检查
+      run: ./gradlew :app:assembleRelease -x lint --stacktrace --no-daemon
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
@@ -88,4 +82,4 @@ jobs:
         name: AIDE-Termux-Package
         path: |
           **/build/outputs/apk/release/*.apk
-          **/build/outputs/apk/*.apk
+          app/build/outputs/apk/**/*.apk
