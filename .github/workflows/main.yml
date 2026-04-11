@@ -48,14 +48,11 @@ jobs:
 
     - name: Auto-Repair Project Structure
       run: |
-        # 1. 动态生成符合语法的 settings.gradle
-        # 将路径转换为 ':module-name' 格式并用逗号隔开
-        echo "🚀 正在扫描子模块并生成合法语法..."
+        # 1. 动态生成 settings.gradle
         MODULES=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|'\:\1'|" | paste -sd "," - | sed 's/,/, /g')
         echo "include $MODULES" > settings.gradle
-        echo "✅ 生成的 settings.gradle 内容: $(cat settings.gradle)"
 
-        # 2. 重写干净的根目录 build.gradle
+        # 2. 重写根目录 build.gradle
         cat <<EOF > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -66,20 +63,29 @@ jobs:
         }
         EOF
 
-        # 3. 批量清洗所有子模块的 JavaVersion 和现代语法残留
+        # 3. 全局清洗 JavaVersion 和语法
         find . -name "*.gradle" -type f -exec sed -i 's/JavaVersion.VERSION_8/JavaVersion.VERSION_1_8/g' {} +
         find . -name "*.gradle" -type f -exec sed -i '/buildFeatures/,/}/d' {} +
         find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
 
-        # 4. 确保主 app 模块有正确的插件声明
-        if [ -d "app" ]; then
-           if ! grep -q "com.android.application" app/build.gradle; then
-              sed -i "1i apply plugin: 'com.android.application'" app/build.gradle
-           fi
-        fi
+        # 4. 智能插件注入：为每个包含 android{} 的模块确保有插件声明
+        echo "🚀 开始智能注入插件..."
+        find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
+          if grep -q "android {" "$file"; then
+            if ! grep -q "apply plugin" "$file" && ! grep -q "plugins {" "$file"; then
+              if [[ "$file" == *"app"* ]]; then
+                echo "为 $file 注入 application 插件"
+                sed -i "1i apply plugin: 'com.android.application'" "$file"
+              else
+                echo "为 $file 注入 library 插件"
+                sed -i "1i apply plugin: 'com.android.library'" "$file"
+              fi
+            fi
+          fi
+        done
 
     - name: Build All Modules
-      # 使用 assembleDebug 避开签名和混淆的坑
+      # 使用 assembleDebug 避开签名坑
       run: ./gradlew assembleDebug -x lint --stacktrace --no-daemon
 
     - name: Upload Artifacts
