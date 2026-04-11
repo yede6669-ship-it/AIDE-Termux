@@ -1,4 +1,4 @@
-name: Android CI (Full Recovery Mode)
+name: Android CI (Extreme Recovery Mode)
 
 on:
   push:
@@ -19,19 +19,13 @@ jobs:
         submodules: recursive
 
     - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
+      uses: android-actions/setup-android@v3 # 优先安装 SDK 环境
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
-
-    - name: Install SDK Components
+    - name: Install SDK & NDK
       run: |
         $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "platforms;android-33" "build-tools;30.0.3"
 
-    - name: Switch to JDK 11
+    - name: Switch to JDK 11 (Standard for AGP 4.1.0)
       uses: actions/setup-java@v4
       with:
         java-version: '11'
@@ -46,13 +40,13 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Radical Project Sanitization
+    - name: Surgical Project Repair
       run: |
-        # 1. 自动生成模块索引 (settings.gradle)
+        # 1. 生成 settings.gradle
         MODULES=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|'\:\1'|" | paste -sd "," - | sed 's/,/, /g')
         echo "include $MODULES" > settings.gradle
 
-        # 2. 彻底重写根目录 build.gradle
+        # 2. 生成根目录 build.gradle
         cat <<EOF > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -63,16 +57,28 @@ jobs:
         }
         EOF
 
-        # 3. 强力重写所有子模块，注入 com.termux 命名空间
+        # 3. 物理修复所有 AndroidManifest.xml (最重要一步)
+        # 强制注入 package="com.termux"，否则 AGP 4.1.0 会报错找不到包名
+        echo "🚀 正在物理修复清单文件..."
+        find . -name "AndroidManifest.xml" | while read -r manifest; do
+          # 替换 ${applicationId} 为硬编码，防止解析失败
+          sed -i 's/\${applicationId}/com.termux/g' "$manifest"
+          
+          # 如果清单中没有 package 属性，强行在 <manifest 标签中注入
+          if ! grep -q "package=" "$manifest"; then
+            sed -i 's/<manifest/<manifest package="com.termux"/g' "$manifest"
+          fi
+          echo "✅ 修复完成: $manifest"
+        done
+
+        # 4. 强制重写所有子模块 build.gradle
         find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
           if grep -q "android {" "$file"; then
             DIR_NAME=$(basename $(dirname "$file"))
-            
-            # 统一包名为 com.termux 以匹配 Manifest 里的 Activity 路径
             PKG_NAME="com.termux"
+            
             PLUGIN="com.android.library"
             APP_ID_BLOCK=""
-            
             if [[ "$file" == *"app"* ]]; then 
                 PLUGIN="com.android.application"
                 APP_ID_BLOCK="applicationId '$PKG_NAME'"
@@ -89,8 +95,13 @@ jobs:
                 targetSdkVersion 33
                 versionCode 1
                 versionName "1.0"
-                // 解决 Manifest 占位符无法识别的问题
                 manifestPlaceholders = [applicationId: "$PKG_NAME"]
+            }
+            // 针对部分 AGP 版本，显式声明命名空间
+            sourceSets {
+                main {
+                    manifest.srcFile 'src/main/AndroidManifest.xml'
+                }
             }
             lintOptions { abortOnError false }
             compileOptions {
@@ -99,26 +110,22 @@ jobs:
             }
         }
         EOF
-            # 保留原有的依赖定义
+            # 仅保留原文件中的依赖部分
             sed -n '/dependencies {/,$p' "$file" >> "${file}.tmp"
             mv "${file}.tmp" "$file"
-            echo "✅ 模块 $DIR_NAME 修复完成"
           fi
         done
 
-        # 4. 关键步骤：物理替换 Manifest 里的变量，解决 packageName 找不到的报错
-        find . -name "AndroidManifest.xml" -exec sed -i 's/\${applicationId}/com.termux/g' {} +
-        
-        # 5. 清理 JCenter 引用
+        # 5. 全局清理 JCenter 引用
         find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
 
-    - name: Build Debug APK
+    - name: Build All Modules
       run: ./gradlew assembleDebug -x lint --stacktrace --no-daemon
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-AIDE-Compatible-Build
+        name: Termux-AIDE-Fixed-APKs
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
