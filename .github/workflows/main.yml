@@ -1,4 +1,4 @@
-name: Android CI (Legacy Support Fix)
+name: Android CI (Final Robust Build)
 
 on:
   push:
@@ -7,8 +7,7 @@ on:
 
 env:
   JAVA_VERSION: '17'
-  # 强制 Gradle 使用更现代的内存配置，并忽略高版本的干扰
-  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false -Dorg.gradle.configureondemand=false"
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false"
 
 jobs:
   build:
@@ -31,83 +30,91 @@ jobs:
 
     - name: Surgical Reconstruction
       run: |
-        # 1. 创建模块目录
+        # 1. 创建所有模块的标准目录
         MODULES=("aide-termux" "app" "terminal-emulator" "terminal-view" "termux-shared")
         for MOD in "${MODULES[@]}"; do
           mkdir -p "$MOD/src/main/java"
           mkdir -p "$MOD/src/main/res"
         done
 
-        # 2. 动态寻找并安置文件 (解决 cp 找不到文件的问题)
-        find_file() {
-          find . -name "$1" -not -path "*/src/main/*" | head -n 1
+        # 2. 增强型文件定位器
+        # 这个函数会扫描整个仓库，根据文件名关键词寻找文件
+        locate_and_move() {
+          local pattern="$1"
+          local target_path="$2"
+          # 搜索匹配的文件并取第一个
+          local found=$(find . -name "*$pattern*" -type f -not -path "*/.git/*" -not -path "*/src/main/*" | head -n 1)
+          
+          if [ -z "$found" ]; then
+            echo "⚠️ 找不到匹配 $pattern 的文件，正在创建占位符..."
+            if [[ $target_path == *.xml ]]; then
+              echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"></manifest>' > "$target_path"
+            else
+              touch "$target_path"
+            fi
+          else
+            echo "✅ 成功定位: $found -> $target_path"
+            cp "$found" "$target_path"
+          fi
         }
 
-        cp "$(find_file "AndroidManifest.xml")"     "aide-termux/src/main/AndroidManifest.xml" || echo "<manifest package='com.aide.termux'/>" > "aide-termux/src/main/AndroidManifest.xml"
-        cp "$(find_file "AndroidManifest (1).xml")" "app/src/main/AndroidManifest.xml"
-        cp "$(find_file "AndroidManifest (2).xml")" "terminal-emulator/src/main/AndroidManifest.xml"
-        cp "$(find_file "AndroidManifest (3).xml")" "terminal-view/src/main/AndroidManifest.xml"
-        cp "$(find_file "AndroidManifest (4).xml")" "termux-shared/src/main/AndroidManifest.xml"
+        # 映射 AndroidManifest (根据你提供的文件名特征)
+        # 注意：这里使用了模糊匹配，避开括号带来的 stat 错误
+        locate_and_move "AndroidManifest.xml"     "aide-termux/src/main/AndroidManifest.xml"
+        locate_and_move "AndroidManifest (1).xml" "app/src/main/AndroidManifest.xml"
+        locate_and_move "AndroidManifest (2).xml" "terminal-emulator/src/main/AndroidManifest.xml"
+        locate_and_move "AndroidManifest (3).xml" "terminal-view/src/main/AndroidManifest.xml"
+        locate_and_move "AndroidManifest (4).xml" "termux-shared/src/main/AndroidManifest.xml"
 
-        # 3. 生成【全新】的根 build.gradle (避开 jcenter 错误)
-        # 不要使用你上传的那个根 build.gradle，它太旧了
+        # 3. 生成全新的 Gradle 根配置 (避开 jcenter 和旧语法报错)
         cat <<EOF > build.gradle
         buildscript {
-            repositories {
-                google()
-                mavenCentral()
-            }
-            dependencies {
-                classpath 'com.android.tools.build:gradle:4.1.0'
-            }
+            repositories { google(); mavenCentral() }
+            dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }
         }
         allprojects {
-            repositories {
-                google()
-                mavenCentral()
-            }
+            repositories { google(); mavenCentral() }
         }
         EOF
 
-        # 4. 重新生成 settings.gradle
         echo "include ':aide-termux', ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
 
-        # 5. 修复模块级 build.gradle (核心语法升级)
-        process_mod_gradle() {
-          local mod=$1
-          local pkg=$2
-          local target="$mod/build.gradle"
-          local src=$(find_file "build${mod: -2}.gradle") # 尝试匹配带括号的文件
-          
-          # 针对不同模块生成标准的 build.gradle，不再直接 cp 上传的文件，因为旧语法必错
-          PLUGIN="com.android.library"
-          [[ "$mod" == "app" || "$mod" == "aide-termux" ]] && PLUGIN="com.android.application"
-          
-          cat <<EOF > "$target"
-          apply plugin: '$PLUGIN'
+        # 4. 核心修复：手动注入包名和依赖，不再信任原始 build.gradle
+        # 因为 AIDE 提取出的 build.gradle 往往包含无法在服务器运行的本地路径
+        create_mod_gradle() {
+          local mod="$1"
+          local pkg="$2"
+          local is_app="$3"
+          local b_path="$mod/build.gradle"
+          local m_path="$mod/src/main/AndroidManifest.xml"
+
+          # 强制修正清单：注入 package 并替换 ${applicationId}
+          sed -i "s/<manifest[^>]*>/<manifest xmlns:android=\"http:\/\/schemas.android.com\/apk\/res\/android\" package=\"$pkg\">/g" "$m_path"
+          sed -i 's/\${applicationId}/com.termux/g' "$m_path"
+
+          # 生成适配服务器的 build.gradle
+          local plugin="com.android.library"
+          [[ "$is_app" == "true" ]] && plugin="com.android.application"
+
+          cat <<EOF > "$b_path"
+          apply plugin: '$plugin'
           android {
               compileSdkVersion 33
               buildToolsVersion "30.0.3"
               defaultConfig {
                   minSdkVersion 21
                   targetSdkVersion 33
-                  versionCode 1
-                  versionName "1.0"
-                  [[ "$PLUGIN" == "com.android.application" ]] && applicationId "$pkg"
+                  [[ "$is_app" == "true" ]] && applicationId "$pkg"
               }
-              sourceSets {
-                  main {
-                      manifest.srcFile 'src/main/AndroidManifest.xml'
-                      java.srcDirs = ['src/main/java', 'java', 'src']
-                      res.srcDirs = ['src/main/res', 'res']
-                  }
-              }
-              lintOptions { abortOnError false }
+              sourceSets { main { 
+                  manifest.srcFile 'src/main/AndroidManifest.xml'
+                  java.srcDirs = ['src/main/java', 'java', 'src']
+                  res.srcDirs = ['src/main/res', 'res']
+              } }
           }
           dependencies {
               implementation fileTree(dir: 'libs', include: ['*.jar'])
               implementation 'androidx.appcompat:appcompat:1.3.1'
-              implementation 'com.google.android.material:material:1.4.0'
               if ("$mod" == "app") {
                   implementation project(':terminal-emulator')
                   implementation project(':terminal-view')
@@ -117,27 +124,26 @@ jobs:
         EOF
         }
 
-        process_mod_gradle "aide-termux" "com.aide.termux"
-        process_mod_gradle "app" "com.termux"
-        process_mod_gradle "terminal-emulator" "com.termux.terminal"
-        process_mod_gradle "terminal-view" "com.termux.view"
-        process_mod_gradle "termux-shared" "com.termux.shared"
+        create_mod_gradle "aide-termux" "com.aide.termux" "true"
+        create_mod_gradle "app" "com.termux" "true"
+        create_mod_gradle "terminal-emulator" "com.termux.terminal" "false"
+        create_mod_gradle "terminal-view" "com.termux.view" "false"
+        create_mod_gradle "termux-shared" "com.termux.shared" "false"
 
-    - name: Force Gradle Downgrade
+    - name: Install Legacy Gradle
       run: |
-        # 因为环境里的 Gradle 9 太新了，我们必须强制下载一个能跑 AGP 4.1.0 的老版本
+        # 强制下载并使用兼容的 Gradle 6.7.1，避开系统自带的 9.4 报错
         wget -q https://services.gradle.org/distributions/gradle-6.7.1-bin.zip
         unzip -q gradle-6.7.1-bin.zip
-        mv gradle-6.7.1 /opt/gradle
-        echo "/opt/gradle/bin" >> $GITHUB_PATH
+        echo "$(pwd)/gradle-6.7.1/bin" >> $GITHUB_PATH
 
-    - name: Build with Gradle 6.7.1
+    - name: Build APK
       run: |
-        # 使用刚下载的老版本 Gradle 编译
+        # 使用刚下载的 gradle 运行编译
         gradle assembleDebug --stacktrace --no-daemon
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Fixed-APK
+        name: AIDE-Termux-Fixed
         path: "**/build/outputs/apk/**/*.apk"
