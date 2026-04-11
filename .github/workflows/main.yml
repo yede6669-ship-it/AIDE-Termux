@@ -3,9 +3,11 @@ name: Android CI
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch:
+
+env:
+  # 解决你日志中的弃用警告，强制使用 Node 24
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -15,12 +17,12 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
       with:
-        submodules: recursive # 如果项目有子模块，必须开启
+        submodules: recursive
 
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
-        java-version: '17' # Compose 项目强制要求 JDK 17 或更高
+        java-version: '17'
         distribution: 'temurin'
         cache: gradle
 
@@ -29,19 +31,21 @@ jobs:
 
     - name: Install NDK
       run: |
-        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
-        # 注意：这里的 NDK 版本应与 build.gradle 中的 ndkVersion 一致
+        # 建议根据 il2Fusion 的实际需求安装 NDK
+        # 如果项目没指定版本，r25c 通常是最稳的
+        sdkmanager --install "ndk;25.2.9519653"
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
     - name: Build with Gradle
-      run: ./gradlew assembleRelease --stacktrace
+      # 添加 --no-daemon 适合 CI 环境，减少内存冲突
+      run: ./gradlew assembleRelease --stacktrace --no-daemon
 
-    - name: Upload APK
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: il2Fusion-Release
+        name: il2Fusion-Binaries
         path: |
-          app/build/outputs/apk/release/*.apk
-          module/build/outputs/zygisk/*.zip
+          **/build/outputs/apk/release/*.apk
+          **/build/outputs/zygisk/*.zip
