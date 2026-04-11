@@ -18,11 +18,11 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up JDK 11
-      # 切换到 JDK 11，这是 Gradle 6.x 的最佳搭档
+    - name: Set up JDK 17 (For SDK Manager)
+      # 必须先用 17，否则 setup-android 会报错退出
       uses: actions/setup-java@v4
       with:
-        java-version: '11'
+        java-version: '17'
         distribution: 'temurin'
 
     - name: Setup Android SDK
@@ -32,8 +32,15 @@ jobs:
       run: |
         $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
 
+    - name: Switch to JDK 11 (For Build)
+      # 环境准备好了，切回 JDK 11 准备编译
+      uses: actions/setup-java@v4
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+        cache: gradle
+
     - name: Force Inject Gradle 6.7.1 Wrapper
-      # 放弃 2.2 考古版，改用能理解 buildFeatures 的现代版
       run: |
         echo "🚀 正在注入 Gradle 6.7.1..."
         mkdir -p gradle/wrapper
@@ -44,21 +51,22 @@ jobs:
 
     - name: Patch Build Scripts
       run: |
-        # 1. 修复仓库
+        # 1. 修复仓库地址
         find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
         find . -name "*.gradle" -type f -exec sed -i "s/google()/google()/g" {} +
         
-        # 2. 如果插件版本太低，强制升级插件版本以匹配 Gradle 6.7
-        # 把 classpath 'com.android.tools.build:gradle:x.x.x' 换成 4.1.0
-        sed -i "s/classpath 'com.android.tools.build:gradle:.*'/classpath 'com.android.tools.build:gradle:4.1.0'/g" build.gradle
+        # 2. 尝试修复插件版本冲突
+        # 如果你的项目 build.gradle 里的插件太老，这里强行修正为兼容 Gradle 6.7 的版本
+        sed -i "s/classpath 'com.android.tools.build:gradle:.*'/classpath 'com.android.tools.build:gradle:4.1.0'/g" build.gradle || true
 
     - name: Build with Gradle
+      # 在 JDK 11 环境下执行构建
       run: ./gradlew assembleRelease --stacktrace --no-daemon
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Modern-Build
+        name: AIDE-Termux-Package
         path: |
           **/build/outputs/apk/release/*.apk
           **/build/outputs/apk/*.apk
