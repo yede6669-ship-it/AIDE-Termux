@@ -1,4 +1,4 @@
-name: Android CI (Legacy Archaeology Mode)
+name: Android CI (Archaeology Hybrid)
 
 on:
   push:
@@ -18,20 +18,27 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up JDK 8
-      # Gradle 2.2 绝对跑不动 JDK 11/17，必须回退到 Java 8
+    - name: Set up JDK 17 (To Satisfy SDK Manager)
+      # 第一步：先用 JDK 17，让 sdkmanager 开心，通过验证
       uses: actions/setup-java@v4
       with:
-        java-version: '8'
+        java-version: '17'
         distribution: 'temurin'
 
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
+    - name: Set up JDK 8 (For Actual Compilation)
+      # 第二步：环境就绪后，强行把全局 Java 切换回 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+        cache: gradle
+
     - name: Force Inject Gradle 2.2 Wrapper
-      # 强行注入那个时代的“心脏”
       run: |
-        echo "🏺 正在启动考古模式：注入 Gradle 2.2..."
+        echo "🚀 正在注入 Gradle 2.2 引导程序..."
         mkdir -p gradle/wrapper
         curl -L https://raw.githubusercontent.com/gradle/gradle/v2.2/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
         
@@ -40,20 +47,20 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v2.2/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Fix Legacy Repositories
-      # 那个年代连 mavenCentral 都不一定稳，强行加上 google 和 jcenter 的旧版镜像
+    - name: Patch Legacy Build Scripts
       run: |
-        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/jcenter()\n        google()/g' {} +
-        # 很多旧项目缺少 google() 仓库定义
-        find . -name "build.gradle" -type f -exec sed -i 's/repositories {/repositories {\n        google()/g' {} +
+        # 考古修复：JCenter 已死，强换 MavenCentral 并在 root 注入 google 仓库
+        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
+        # 确保 buildscript 和 allprojects 都有 google()，否则老插件下不下来
+        sed -i 's/repositories {/repositories {\n        google()/g' build.gradle
 
     - name: Build with Gradle 2.2
-      # 考古版 Gradle 不支持很多现代参数，只求能跑通
+      # 此时执行环境是 JDK 8，能满足 Gradle 2.2 的要求
       run: ./gradlew assembleRelease --info
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Antique-Output
+        name: AIDE-Antique-Build
         path: |
           **/build/outputs/apk/*.apk
