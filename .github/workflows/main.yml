@@ -1,4 +1,4 @@
-name: Android CI (AAPT2 Stability Fix)
+name: Android CI (AAPT2 Final Fix)
 
 on:
   push:
@@ -33,29 +33,47 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Project Reconstruction & AAPT2 Fix
+    - name: Project Reconstruction & Plugin Fix
       run: |
         # 1. 自动归位模块
-        EMULATOR_PATH=$(find . -maxdepth 3 -name "terminal-emulator" -type d | head -n 1)
-        VIEW_PATH=$(find . -maxdepth 3 -name "terminal-view" -type d | head -n 1)
-        SHARED_PATH=$(find . -maxdepth 3 -name "termux-shared" -type d | head -n 1)
-        APP_PATH=$(find . -maxdepth 3 -name "app" -type d | head -n 1)
-        [ -n "$EMULATOR_PATH" ] && mv "$EMULATOR_PATH" ./terminal-emulator || true
-        [ -n "$VIEW_PATH" ] && mv "$VIEW_PATH" ./terminal-view || true
-        [ -n "$SHARED_PATH" ] && mv "$SHARED_PATH" ./termux-shared || true
-        [ -n "$APP_PATH" ] && mv "$APP_PATH" ./app || true
+        for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
+          P=$(find . -maxdepth 3 -name "$m" -type d | head -n 1)
+          [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
+        done
 
-        # 2. 全局强制 SDK 31 并清理语法
-        find . -name "build.gradle" -exec sed -i 's/compileSdkVersion [0-9]*/compileSdkVersion 31/g' {} +
-        find . -name "build.gradle" -exec sed -i 's/compileSdk [0-9]*/compileSdk 31/g' {} +
-        find . -name "build.gradle" -exec sed -i 's/\bcompile\b/implementation/g' {} +
+        # 2. 暴力重写子模块的 build.gradle，确保它们是 Library 且 SDK 对齐
+        # 处理 terminal-emulator
+        cat <<'EOF' > terminal-emulator/build.gradle
+        apply plugin: 'com.android.library'
+        android {
+            compileSdk 31
+            namespace "com.termux.terminal"
+            defaultConfig { minSdk 21 }
+        }
+        EOF
 
-        # 3. 注入 Namespace 解决过时警告并稳定 AAPT2
-        sed -i '/android {/a \    namespace "com.termux.terminal"' terminal-emulator/build.gradle || true
-        sed -i '/android {/a \    namespace "com.termux.view"' terminal-view/build.gradle || true
-        sed -i '/android {/a \    namespace "com.termux.shared"' termux-shared/build.gradle || true
+        # 处理 terminal-view
+        cat <<'EOF' > terminal-view/build.gradle
+        apply plugin: 'com.android.library'
+        android {
+            compileSdk 31
+            namespace "com.termux.view"
+            defaultConfig { minSdk 21 }
+        }
+        dependencies { implementation project(':terminal-emulator') }
+        EOF
 
-        # 4. 根配置：增加 JitPack 和依赖拦截
+        # 处理 termux-shared
+        cat <<'EOF' > termux-shared/build.gradle
+        apply plugin: 'com.android.library'
+        android {
+            compileSdk 31
+            namespace "com.termux.shared"
+            defaultConfig { minSdk 21 }
+        }
+        EOF
+
+        # 3. 根配置：加入 JitPack 并强制全局降级
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
@@ -77,16 +95,14 @@ jobs:
         include ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'
         EOF
 
-        # 5. 关键：增加 AAPT2 容错属性
         cat <<'EOF' > gradle.properties
         android.useAndroidX=true
         android.enableJetifier=true
         android.suppressUnsupportedCompileSdk=31
-        # 允许资源合并冲突，防止 AAPT2 崩溃
-        android.nonTransitiveRClass=false
+        android.nonTransitiveRClass=true
         EOF
 
-        # 6. 重写 app 模块配置
+        # 4. 重写主 app 模块配置
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -124,12 +140,12 @@ jobs:
       run: |
         export JAVA_HOME=$JAVA_HOME_11_X64
         export PATH=$JAVA_HOME/bin:$PATH
-        # --stacktrace 帮助我们捕获更深层的 AAPT2 错误
+        # 增加 --stacktrace 监控最后的链接步骤
         gradle :app:assembleDebug --no-daemon --refresh-dependencies --stacktrace
 
     - name: Upload
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Build-Stable
+        name: Termux-Build-Final
         path: "app/build/outputs/apk/debug/*.apk"
