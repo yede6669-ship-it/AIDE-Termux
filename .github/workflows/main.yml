@@ -1,4 +1,4 @@
-name: Android CI (Final Protocol)
+name: Android CI (Final Recovery)
 
 on:
   push:
@@ -27,9 +27,9 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Install NDK
+    - name: Install NDK & SDK Components
       run: |
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "platforms;android-33" "build-tools;30.0.3"
 
     - name: Switch to JDK 11
       uses: actions/setup-java@v4
@@ -46,13 +46,13 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Global Configuration Injection
+    - name: Radical Project Sanitization
       run: |
-        # 1. 自动生成模块索引
+        # 1. 重新生成 settings.gradle
         MODULES=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|'\:\1'|" | paste -sd "," - | sed 's/,/, /g')
         echo "include $MODULES" > settings.gradle
 
-        # 2. 在根目录 build.gradle 中通过 subprojects 注入配置
+        # 2. 重置根目录 build.gradle
         cat <<EOF > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -61,43 +61,49 @@ jobs:
         allprojects {
             repositories { google(); mavenCentral() }
         }
-        // 核心：强制给所有含有 android 配置的子模块应用插件
-        subprojects {
-            project.afterEvaluate {
-                if (project.hasProperty('android')) {
-                    // 这种方式可以在不改动子模块文件的情况下注入
-                }
-            }
-        }
         EOF
 
-        # 3. 物理清理：移除子模块中所有可能导致冲突的插件声明和 JavaVersion 错误
-        echo "🚀 正在进行全局语法脱敏..."
-        find . -name "*.gradle" -type f -exec sed -i 's/JavaVersion.VERSION_8/JavaVersion.VERSION_1_8/g' {} +
-        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
-        find . -name "*.gradle" -type f -exec sed -i '/buildFeatures/,/}/d' {} +
-        
-        # 4. 针对 'android()' 找不到的问题：
-        # 既然 sed 替换容易出错，我们直接在每个 build.gradle 的最顶端插入插件声明，
-        # 并注释掉原有的 apply plugin 语句。
+        # 3. 强力重写所有子模块的 Gradle 脚本
         find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
           if grep -q "android {" "$file"; then
             PLUGIN="com.android.library"
             if [[ "$file" == *"app"* ]]; then PLUGIN="com.android.application"; fi
-            # 先注释掉所有的 apply plugin，再在第一行插入我们正确的
-            sed -i 's/apply plugin:/ \/\/ apply plugin:/g' "$file"
-            sed -i "1i apply plugin: '$PLUGIN'" "$file"
-            echo "✅ 已强行注入插件: $file"
+            
+            # 提取 android { ... } 块之后的内容（保留依赖声明）
+            # 这种方法会丢弃原本可能出错的 android 闭包配置，改用统一的模板
+            cat <<EOF > "${file}.tmp"
+        apply plugin: '$PLUGIN'
+
+        android {
+            compileSdkVersion 33
+            buildToolsVersion "30.0.3"
+            defaultConfig {
+                minSdkVersion 21
+                targetSdkVersion 33
+            }
+            compileOptions {
+                sourceCompatibility JavaVersion.VERSION_1_8
+                targetCompatibility JavaVersion.VERSION_1_8
+            }
+        }
+        EOF
+            # 只保留原文件中 dependencies { ... } 之后的内容
+            sed -n '/dependencies {/,$p' "$file" >> "${file}.tmp"
+            mv "${file}.tmp" "$file"
+            echo "🔥 已强力重构模块脚本: $file"
           fi
         done
 
-    - name: Build All Modules
+        # 4. 全局清理无效引用
+        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
+
+    - name: Build Debug APK
       run: ./gradlew assembleDebug -x lint --stacktrace --no-daemon
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Package
+        name: AIDE-Termux-Fixed-Build
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
