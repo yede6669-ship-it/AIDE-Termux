@@ -1,4 +1,4 @@
-name: Android CI (Guava & Annotation Fix)
+name: Android CI (The Final Fix)
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: High-Intensity Code Fix
+    - name: Surgical Code Fix
       run: |
         # 1. 模块归位
         for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
@@ -33,22 +33,19 @@ jobs:
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 全面修复 R 类、BuildConfig 和 Log
-        # 将所有可能的 R 类引用指向 com.termux.R
+        # 2. R 类与 Log 修复 (维持之前的成功经验)
         find . -name "*.java" -exec sed -i 's/import com.termux.shared.R;/import com.termux.R;/g' {} +
         find . -name "*.java" -exec sed -i 's/import com.termux.view.R;/import com.termux.R;/g' {} +
         find . -name "*.java" -exec sed -i 's/com.termux.shared.R./com.termux.R./g' {} +
         find . -name "*.java" -exec sed -i 's/com.termux.view.R./com.termux.R./g' {} +
-        
-        # 统一 BuildConfig
-        find . -name "*.java" -exec sed -i 's/import com.termux.BuildConfig;/import com.termux.BuildConfig;/g' {} +
-        find . -name "*.java" -exec sed -i 's/import com.termux.app.BuildConfig;/import com.termux.BuildConfig;/g' {} +
-        
-        # 修复 Log 和单参数 Log.d
         find . -name "*.java" -exec sed -i 's/io.github.zeroaicy.util.Log/android.util.Log/g' {} +
         find . -name "*.java" -exec sed -i 's/Log.d("/Log.d("Termux", "/g' {} +
+        
+        # 3. 统一 BuildConfig 导入路径
+        find . -name "*.java" -exec sed -i 's/import com.termux.app.BuildConfig;/import com.termux.BuildConfig;/g' {} +
+        find . -name "*.java" -exec sed -i 's/import com.termux.shared.BuildConfig;/import com.termux.BuildConfig;/g' {} +
 
-        # 3. 资源去重 (保留 values)
+        # 4. 资源去重 (保留 values)
         find termux-shared/src/main/res/ -type f | while read file; do
             filename=$(basename "$file")
             dirname=$(basename $(dirname "$file"))
@@ -57,7 +54,7 @@ jobs:
             fi
         done
 
-        # 4. 构建配置
+        # 5. 构建脚本基础
         echo "include ':app', ':terminal-emulator'" > settings.gradle
         cat <<'EOF' > build.gradle
         buildscript {
@@ -69,7 +66,7 @@ jobs:
         }
         EOF
 
-        # 5. 独立模块 terminal-emulator
+        # 6. terminal-emulator 配置
         cat <<'EOF' > terminal-emulator/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -80,7 +77,7 @@ jobs:
         dependencies { implementation 'androidx.annotation:annotation:1.7.0' }
         EOF
 
-        # 6. 主 App 配置 (强化依赖链)
+        # 7. 主 App 配置 (【核心修改】开启 buildConfig)
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -93,6 +90,9 @@ jobs:
                 versionCode 1
                 versionName "1.0"
             }
+            buildFeatures {
+                buildConfig = true  // 显式开启 BuildConfig 生成
+            }
             sourceSets {
                 main {
                     java.srcDirs = ['src/main/java', '../termux-shared/src/main/java', '../terminal-view/src/main/java']
@@ -103,18 +103,12 @@ jobs:
         }
         dependencies {
             implementation project(':terminal-emulator')
-            
-            // 核心库
             implementation 'androidx.appcompat:appcompat:1.6.1'
             implementation 'com.google.android.material:material:1.11.0'
             implementation 'androidx.preference:preference:1.2.1'
             implementation 'androidx.window:window:1.2.0'
-            
-            // 【关键修复】显式引入 Guava 及其注解支持
             implementation 'com.google.guava:guava:33.0.0-android'
             implementation 'com.google.code.findbugs:jsr305:3.0.2'
-            
-            // 其他工具库
             implementation 'commons-io:commons-io:2.15.1'
             implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'
             implementation 'io.noties.markwon:core:4.6.2'
