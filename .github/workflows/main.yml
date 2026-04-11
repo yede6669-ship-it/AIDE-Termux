@@ -42,11 +42,12 @@ jobs:
 
     - name: Advanced Project Repair
       run: |
-        # 1. 基础配置
+        # 1. 生成 settings.gradle
         MODULES=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|'\:\1'|" | paste -sd "," - | sed 's/,/, /g')
         echo "include $MODULES" > settings.gradle
 
-        cat <<EOF > build.gradle
+        # 2. 生成根目录 build.gradle
+        cat << 'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
             dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }
@@ -56,21 +57,19 @@ jobs:
         }
         EOF
 
-        # 2. 结构自愈与 Manifest 修复
-        echo "🚀 正在执行结构对齐与清单修复..."
+        # 3. 结构自愈与 Manifest 修复
+        echo "🚀 开始修复模块结构..."
         find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
           MOD_DIR=$(dirname "$file")
-          
-          # 确保存在标准的 Android 目录结构
           mkdir -p "$MOD_DIR/src/main"
           
-          # 寻找并移动可能位置不对的 AndroidManifest.xml
+          # 移动 Manifest
           REAL_MANIFEST=$(find "$MOD_DIR" -name "AndroidManifest.xml" | head -n 1)
           if [ -n "$REAL_MANIFEST" ] && [ "$REAL_MANIFEST" != "$MOD_DIR/src/main/AndroidManifest.xml" ]; then
              mv "$REAL_MANIFEST" "$MOD_DIR/src/main/AndroidManifest.xml"
           fi
 
-          # 物理注入 Package 属性
+          # 物理注入 Package
           MANIFEST_PATH="$MOD_DIR/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST_PATH" ]; then
             sed -i 's/\${applicationId}/com.termux/g' "$MANIFEST_PATH"
@@ -78,35 +77,34 @@ jobs:
               sed -i 's/<manifest/<manifest package="com.termux"/g' "$MANIFEST_PATH"
             fi
           else
-            # 兜底：如果完全没有 Manifest，创建一个最小化的
-            cat <<EOF > "$MANIFEST_PATH"
-            <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux" />
-EOF
+            echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux" />' > "$MANIFEST_PATH"
           fi
 
-          # 3. 强力重写 build.gradle
+          # 4. 强力重写子模块 build.gradle
           PKG_NAME="com.termux"
           PLUGIN="com.android.library"
-          [ "$MOD_DIR" == "./app" ] && PLUGIN="com.android.application"
+          if [[ "$MOD_DIR" == *"app"* ]]; then PLUGIN="com.android.application"; fi
           
-          cat <<EOF > "${file}.tmp"
-        apply plugin: '$PLUGIN'
-        android {
-            compileSdkVersion 33
-            buildToolsVersion "30.0.3"
-            defaultConfig {
-                minSdkVersion 21
-                targetSdkVersion 33
-                versionCode 1
-                versionName "1.0"
-                manifestPlaceholders = [applicationId: "$PKG_NAME"]
-            }
-            // 解决资源报错
-            aaptOptions { namespaced = false }
-            lintOptions { abortOnError false }
-        }
-EOF
-          # 试图恢复原有的 dependencies，如果报错则需要手动检查
+          # 使用变量替换构建临时文件
+          echo "apply plugin: '$PLUGIN'" > "${file}.tmp"
+          echo "android {" >> "${file}.tmp"
+          echo "    compileSdkVersion 33" >> "${file}.tmp"
+          echo "    buildToolsVersion '30.0.3'" >> "${file}.tmp"
+          echo "    defaultConfig {" >> "${file}.tmp"
+          if [[ "$PLUGIN" == "com.android.application" ]]; then
+              echo "        applicationId '$PKG_NAME'" >> "${file}.tmp"
+          fi
+          echo "        minSdkVersion 21" >> "${file}.tmp"
+          echo "        targetSdkVersion 33" >> "${file}.tmp"
+          echo "        versionCode 1" >> "${file}.tmp"
+          echo "        versionName '1.0'" >> "${file}.tmp"
+          echo "        manifestPlaceholders = [applicationId: '$PKG_NAME']" >> "${file}.tmp"
+          echo "    }" >> "${file}.tmp"
+          echo "    aaptOptions { namespaced = false }" >> "${file}.tmp"
+          echo "    lintOptions { abortOnError false }" >> "${file}.tmp"
+          echo "}" >> "${file}.tmp"
+
+          # 恢复依赖
           if grep -q "dependencies {" "$file"; then
             sed -n '/dependencies {/,$p' "$file" >> "${file}.tmp"
           else
@@ -115,13 +113,13 @@ EOF
           mv "${file}.tmp" "$file"
         done
 
-    - name: Build with Stacktrace
+    - name: Build All Modules
       run: ./gradlew assembleDebug -x lint --stacktrace --no-daemon
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Aligned-Build
+        name: AIDE-Termux-Fixed
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
