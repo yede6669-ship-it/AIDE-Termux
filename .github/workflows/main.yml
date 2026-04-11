@@ -1,4 +1,4 @@
-name: Android CI (Atomic Reconstruction v3)
+name: Android CI (Atomic Reconstruction v4)
 
 on:
   push:
@@ -7,6 +7,8 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # 增加 JVM 内存配额，解决快照阶段的超时隐患
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -Dorg.gradle.vfs.watch=false"
 
 jobs:
   build:
@@ -30,7 +32,8 @@ jobs:
       with:
         java-version: '11'
         distribution: 'temurin'
-        cache: gradle
+        # 暂时关闭缓存，防止快照报错
+        cache: '' 
 
     - name: Force Wrapper
       run: |
@@ -40,62 +43,56 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Atomic Reconstruction & Debug
+    - name: Atomic Reconstruction
       run: |
-        # 1. 查找所有有效的子模块（排除根目录和构建目录）
+        # 1. 识别有效模块（过滤 build 文件夹）
         MODULE_LIST=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" -not -path "*/build/*" | sed "s|\./\(.*\)/build\.gradle|\1|")
         
-        # 2. 生成 settings.gradle - 使用最稳妥的单引号包裹
-        echo "// Auto-generated settings.gradle" > settings.gradle
+        # 2. 生成 settings.gradle
+        echo "// Build Fix" > settings.gradle
         for MOD in $MODULE_LIST; do
           echo "include ':$MOD'" >> settings.gradle
         done
 
-        # 3. 生成根目录 build.gradle
+        # 3. 根 build.gradle
         printf "buildscript {\n    repositories { google(); mavenCentral() }\n    dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }\n}\nallprojects {\n    repositories { google(); mavenCentral() }\n}\n" > build.gradle
 
-        # 4. 调试：打印生成的配置文件，方便在 Actions 日志中确认
-        echo "=== DEBUG: settings.gradle ==="
-        cat settings.gradle
-        echo "=============================="
-
-        # 5. 遍历处理每个模块
+        # 4. 模块重构
         for MOD_NAME in $MODULE_LIST; do
           MOD_DIR="./$MOD_NAME"
           TARGET_M_DIR="$MOD_DIR/src/main"
           TARGET_M_PATH="$TARGET_M_DIR/AndroidManifest.xml"
           mkdir -p "$TARGET_M_DIR"
           
-          # 修复 Manifest 物理路径
+          # 物理移动 Manifest
           REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
           if [ -n "$REAL_M" ] && [ "$(realpath "$REAL_M")" != "$(realpath "$TARGET_M_PATH" 2>/dev/null)" ]; then
              cp "$REAL_M" "$TARGET_M_PATH"
           fi
 
-          # 强制包名对齐 (文件夹名中的 - 替换为 _)
+          # 包名统一
           SAFE_PKG="com.termux.${MOD_NAME//-/_}"
           if [ ! -f "$TARGET_M_PATH" ]; then
             printf '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="%s" />\n' "$SAFE_PKG" > "$TARGET_M_PATH"
           else
             sed -i "s/\${applicationId}/com.termux/g" "$TARGET_M_PATH"
-            # 使用简单的字符串替换 package 属性
             sed -i "s/package=\"[^\"]*\"/package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
             if ! grep -q "package=" "$TARGET_M_PATH"; then
                sed -i "s/<manifest/<manifest package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
             fi
           fi
 
-          # 6. 生成子模块 build.gradle
+          # 5. 生成 build.gradle
           BFILE="$MOD_DIR/build.gradle"
           PLUGIN="com.android.library"
           [[ "$MOD_NAME" == "app" ]] && PLUGIN="com.android.application"
           
-          printf "apply plugin: '%s'\n\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n\n    defaultConfig {\n" "$PLUGIN" > "$BFILE"
+          printf "apply plugin: '%s'\n\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n" "$PLUGIN" > "$BFILE"
           [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "$BFILE"
           printf "        minSdkVersion 21\n        targetSdkVersion 33\n        versionCode 1\n        versionName '1.0'\n        manifestPlaceholders = [applicationId: 'com.termux']\n    }\n" >> "$BFILE"
           printf "    lintOptions { abortOnError false }\n    packagingOptions { pickFirst 'lib/*/libtermux.so'; pickFirst '**/libc++_shared.so' }\n}\n\n" >> "$BFILE"
           
-          # 7. 模块依赖自动链接
+          # 依赖建立
           printf "dependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "$BFILE"
           if [[ "$MOD_NAME" == "app" ]]; then
               for OTHER_MOD in $MODULE_LIST; do
@@ -105,13 +102,14 @@ jobs:
           printf "}\n" >> "$BFILE"
         done
 
-    - name: Build APK
-      run: ./gradlew assembleDebug --no-daemon --stacktrace
+    - name: Build Clean APK
+      # 使用 --no-build-cache 和 --no-vfs-watch 强制跳过快照冲突
+      run: ./gradlew clean assembleDebug --no-daemon --no-build-cache --stacktrace
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Build-Atomic
+        name: Termux-Build-Stable
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
