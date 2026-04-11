@@ -1,4 +1,4 @@
-name: Android CI (Atomic Fix v2)
+name: Android CI (Final Fix)
 
 on:
   push:
@@ -41,54 +41,66 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Deep Project Linker
+    - name: Atomic Project Reconstruction
       run: |
-        # 1. 重建 settings.gradle
-        MODULES=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|'\:\1'|" | paste -sd "," - | sed 's/,/, /g')
-        echo "include $MODULES" > settings.gradle
+        # 1. 扫描所有合法的子模块（带 build.gradle 的文件夹）
+        MODULE_LIST=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|\1|")
+        
+        # 生成 settings.gradle
+        echo "include $(echo "$MODULE_LIST" | sed "s|^|':'|" | paste -sd "," - | sed 's/,/, /g')" > settings.gradle
 
         # 2. 重建根目录 build.gradle
         printf "buildscript {\n    repositories { google(); mavenCentral() }\n    dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }\n}\nallprojects {\n    repositories { google(); mavenCentral() }\n}\n" > build.gradle
 
-        # 3. 处理子模块
-        find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
-          MOD_DIR=$(dirname "$file")
-          MOD_NAME=$(basename "$MOD_DIR")
+        # 3. 逐个重构模块
+        for MOD_NAME in $MODULE_LIST; do
+          MOD_DIR="./$MOD_NAME"
           TARGET_M_DIR="$MOD_DIR/src/main"
           TARGET_M_PATH="$TARGET_M_DIR/AndroidManifest.xml"
           
           mkdir -p "$TARGET_M_DIR"
           
-          # 修复 cp 同文件报错：增加相同路径校验
+          # 修复 Manifest 物理位置
           REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
           if [ -n "$REAL_M" ] && [ "$(realpath "$REAL_M")" != "$(realpath "$TARGET_M_PATH" 2>/dev/null)" ]; then
              cp "$REAL_M" "$TARGET_M_PATH"
           fi
 
-          # 修复 Manifest 内容
+          # 强制注入正确的包名（处理中划线为下划线）
+          SAFE_PKG="com.termux.${MOD_NAME//-/_}"
           if [ ! -f "$TARGET_M_PATH" ]; then
-            echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux.'${MOD_NAME//-/_}'" />' > "$TARGET_M_PATH"
+            echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="'$SAFE_PKG'" />' > "$TARGET_M_PATH"
           else
             sed -i 's/\${applicationId}/com.termux/g' "$TARGET_M_PATH"
-            grep -q "package=" "$TARGET_M_PATH" || sed -i 's/<manifest/<manifest package="com.termux.'${MOD_NAME//-/_}'"/g' "$TARGET_M_PATH"
+            # 替换或添加 package 属性
+            if grep -q "package=" "$TARGET_M_PATH"; then
+               sed -i "s/package=\"[^\"]*\"/package=\"$SAFE_PKG\"/" "$TARGET_M_PATH"
+            else
+               sed -i "s/<manifest/<manifest package=\"$SAFE_PKG\"/" "$TARGET_M_PATH"
+            fi
           fi
 
-          # 4. 重新构建 build.gradle
+          # 4. 生成绝对干净且闭合的 build.gradle
           PLUGIN="com.android.library"
-          [[ "$MOD_DIR" == *"app"* ]] && PLUGIN="com.android.application"
+          [[ "$MOD_NAME" == "app" ]] && PLUGIN="com.android.application"
           
-          printf "apply plugin: '$PLUGIN'\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n" > "${file}.tmp"
-          [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "${file}.tmp"
-          printf "        minSdkVersion 21\n        targetSdkVersion 33\n        versionCode 1\n        versionName '1.0'\n        manifestPlaceholders = [applicationId: 'com.termux']\n    }\n" >> "${file}.tmp"
-          printf "    lintOptions { abortOnError false }\n    packagingOptions { pickFirst 'lib/*/libtermux.so'; pickFirst '**/libc++_shared.so' }\n}\n" >> "${file}.tmp"
+          BFILE="$MOD_DIR/build.gradle"
+          printf "apply plugin: '$PLUGIN'\n\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n\n    defaultConfig {\n" > "$BFILE"
+          [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "$BFILE"
+          printf "        minSdkVersion 21\n        targetSdkVersion 33\n        versionCode 1\n        versionName '1.0'\n        manifestPlaceholders = [applicationId: 'com.termux']\n    }\n\n" >> "$BFILE"
+          printf "    lintOptions { abortOnError false }\n    packagingOptions {\n        pickFirst 'lib/*/libtermux.so'\n        pickFirst '**/libc++_shared.so'\n    }\n}\n\n" >> "$BFILE"
           
-          # 5. 恢复依赖
-          printf "dependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "${file}.tmp"
-          if grep -q "dependencies {" "$file"; then
-             grep -E "implementation|api|compile" "$file" | grep -v "fileTree" >> "${file}.tmp" || true
+          # 5. 自动重建依赖块（关键：确保闭合）
+          printf "dependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "$BFILE"
+          # 自动链接其他子模块（如果是 app 模块，链接所有其他模块）
+          if [[ "$MOD_NAME" == "app" ]]; then
+              for OTHER_MOD in $MODULE_LIST; do
+                  [[ "$OTHER_MOD" != "app" ]] && printf "    implementation project(':$OTHER_MOD')\n" >> "$BFILE"
+              done
           fi
-          printf "}\n" >> "${file}.tmp"
-          mv "${file}.tmp" "$file"
+          printf "}\n" >> "$BFILE"
+          
+          echo "✅ 模块 $MOD_NAME 结构已重组"
         done
 
     - name: Build APK
@@ -97,7 +109,7 @@ jobs:
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Fixed-Build
+        name: Termux-Final-Build
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
