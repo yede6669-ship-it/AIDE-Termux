@@ -1,4 +1,4 @@
-name: Android CI (Script Fix)
+name: Android CI (Final JDK Fix)
 
 on:
   push:
@@ -13,10 +13,10 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Set up JDK 11
+    - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
-        java-version: '11' # 降级到 11 提高对 Gradle 6.7 的兼容性
+        java-version: '17' # 必须使用 17 来满足 sdkmanager 的要求
         distribution: 'temurin'
 
     - name: Set up Android SDK
@@ -24,57 +24,45 @@ jobs:
 
     - name: Clean and Reconstruct
       run: |
-        # 彻底移除可能存在的旧配置文件
-        find . -name "*.gradle" -delete
-        rm -rf settings.gradle build.gradle aide-termux app terminal-emulator terminal-view termux-shared
-        
-        # 创建结构
+        # 清理并创建目录
+        rm -rf aide-termux app terminal-emulator terminal-view termux-shared settings.gradle build.gradle
         mkdir -p aide-termux/src/main/java app/src/main/java terminal-emulator/src/main/java terminal-view/src/main/java termux-shared/src/main/java
 
-        # 拷贝清单
+        # 映射清单文件
         cp "AndroidManifest.xml"     "aide-termux/src/main/AndroidManifest.xml" || echo "<manifest package='com.aide.termux'/>" > "aide-termux/src/main/AndroidManifest.xml"
         cp "AndroidManifest (1).xml" "app/src/main/AndroidManifest.xml" || echo "<manifest package='com.termux'/>" > "app/src/main/AndroidManifest.xml"
         cp "AndroidManifest (2).xml" "terminal-emulator/src/main/AndroidManifest.xml" || echo "<manifest package='com.termux.terminal'/>" > "terminal-emulator/src/main/AndroidManifest.xml"
         cp "AndroidManifest (3).xml" "terminal-view/src/main/AndroidManifest.xml" || echo "<manifest package='com.termux.view'/>" > "terminal-view/src/main/AndroidManifest.xml"
         cp "AndroidManifest (4).xml" "termux-shared/src/main/AndroidManifest.xml" || echo "<manifest package='com.termux.shared'/>" > "termux-shared/src/main/AndroidManifest.xml"
 
-        # 生成最简根配置
+        # 生成根配置
         echo "buildscript { repositories { google(); mavenCentral() }; dependencies { classpath 'com.android.tools.build:gradle:4.1.0' } }" > build.gradle
         echo "allprojects { repositories { google(); mavenCentral() } }" >> build.gradle
         echo "include ':aide-termux', ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
 
-        # 生成各模块配置 (使用 echo 避免 cat EOF 带来的潜在换行符问题)
-        # Aide-Termux
-        echo "apply plugin: 'com.android.application'" > aide-termux/build.gradle
-        echo "android { compileSdkVersion 33; defaultConfig { applicationId 'com.aide.termux'; minSdkVersion 24; targetSdkVersion 33 } }" >> aide-termux/build.gradle
-        echo "dependencies { implementation project(':app') }" >> aide-termux/build.gradle
-
-        # App
-        echo "apply plugin: 'com.android.application'" > app/build.gradle
-        echo "android { compileSdkVersion 33; defaultConfig { applicationId 'com.termux'; minSdkVersion 21; targetSdkVersion 33 } }" >> app/build.gradle
-        echo "dependencies { implementation project(':terminal-emulator'); implementation project(':terminal-view'); implementation project(':termux-shared'); implementation 'androidx.appcompat:appcompat:1.3.1' }" >> app/build.gradle
-
-        # Libraries
+        # 生成模块配置 (Echo 方式最安全)
+        echo "apply plugin: 'com.android.application'; android { compileSdkVersion 33; defaultConfig { applicationId 'com.aide.termux'; minSdkVersion 24; targetSdkVersion 33 } }; dependencies { implementation project(':app') }" > aide-termux/build.gradle
+        echo "apply plugin: 'com.android.application'; android { compileSdkVersion 33; defaultConfig { applicationId 'com.termux'; minSdkVersion 21; targetSdkVersion 33 } }; dependencies { implementation project(':terminal-emulator'); implementation project(':terminal-view'); implementation project(':termux-shared'); implementation 'androidx.appcompat:appcompat:1.3.1' }" > app/build.gradle
         echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33 }" > terminal-emulator/build.gradle
         echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33 }; dependencies { implementation project(':terminal-emulator') }" > terminal-view/build.gradle
         echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33 }" > termux-shared/build.gradle
 
-        # 修正清单占位符
+        # 修正占位符
         find . -name "AndroidManifest.xml" -exec sed -i 's/\${applicationId}/com.termux/g' {} +
 
     - name: Setup Gradle
       uses: gradle/gradle-build-action@v3
       with:
-        gradle-version: 6.7.1 # 使用官方 Action 安装 Gradle，更稳定
+        gradle-version: 6.7.1
 
     - name: Build with Gradle
       run: |
-        # 使用更保守的内存参数运行
-        export GRADLE_OPTS="-Xmx2048m -Dorg.gradle.jvmargs='-Xmx2048m -XX:MaxMetaspaceSize=512m'"
+        # 关键修复：设置 JAVA_OPTS 避开 JDK 17 对旧版 Gradle 的部分校验限制
+        export GRADLE_OPTS="-Xmx2048m -Dorg.gradle.jvmargs='--add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-exports java.base/sun.nio.ch=ALL-UNNAMED'"
         gradle assembleDebug --no-daemon --stacktrace
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Built
+        name: AIDE-Termux-Fixed-JDK
         path: "**/build/outputs/apk/**/*.apk"
