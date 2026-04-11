@@ -1,4 +1,4 @@
-name: Android CI (Dual JDK Solution)
+name: Android CI (Debug & Trace)
 
 on:
   push:
@@ -16,8 +16,7 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 步骤 1：先装 JDK 17，专门为了给 Android SDK Manager 用
-    - name: Set up JDK 17 (For SDK Setup)
+    - name: Set up JDK 17 (For SDK Manager)
       uses: actions/setup-java@v4
       with:
         java-version: '17'
@@ -26,7 +25,6 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
-    # 步骤 2：切换回 JDK 11，专门为了 Gradle 6.7.1 编译
     - name: Set up JDK 11 (For Gradle Build)
       uses: actions/setup-java@v4
       with:
@@ -35,20 +33,17 @@ jobs:
 
     - name: Project Reconstruction
       run: |
-        rm -rf aide-termux app terminal-emulator terminal-view termux-shared
-        mkdir -p aide-termux/src/main/res/values app/src/main/res/values terminal-emulator/src/main/java terminal-view/src/main/java termux-shared/src/main/java
+        # 1. 物理目录归位 (保留原始代码)
+        # 这一步假设你的 java 代码在根目录或者某些文件夹里，我们需要把它们移入新结构
+        mkdir -p aide-termux/src/main/java app/src/main/java terminal-emulator/src/main/java terminal-view/src/main/java termux-shared/src/main/java
         
-        # 写入最小化资源和清单
-        echo '<resources><string name="app_name">Termux</string></resources>' > app/src/main/res/values/strings.xml
-        echo '<resources><string name="application_name">AIDE Termux</string></resources>' > aide-termux/src/main/res/values/strings.xml
-        echo '<manifest package="com.aide.termux"><application/></manifest>' > aide-termux/src/main/AndroidManifest.xml
-        echo '<manifest package="com.termux"><application/></manifest>' > app/src/main/AndroidManifest.xml
-        echo '<manifest package="com.termux.terminal"/>' > terminal-emulator/src/main/AndroidManifest.xml
-        echo '<manifest package="com.termux.view"/>' > terminal-view/src/main/AndroidManifest.xml
-        echo '<manifest package="com.termux.shared"/>' > termux-shared/src/main/AndroidManifest.xml
+        # 尝试寻找并移动 java 源文件 (如果它们存在于根目录)
+        find . -maxdepth 1 -name "*.java" -exec cp {} app/src/main/java/ \; || true
 
+        # 2. 生成 settings.gradle
         echo "include ':aide-termux', ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
 
+        # 3. 编写更强大的 build.gradle (增加仓库和基础库)
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); jcenter() }
@@ -59,12 +54,20 @@ jobs:
         }
         EOF
 
-        # 写入模块配置
+        # 4. 模块配置 (注入常用库防止 ClassNotFound)
         echo "apply plugin: 'com.android.application'; android { compileSdkVersion 33; defaultConfig { applicationId 'com.aide.termux'; minSdkVersion 24 } }; dependencies { implementation project(':app') }" > aide-termux/build.gradle
         echo "apply plugin: 'com.android.application'; android { compileSdkVersion 33; defaultConfig { applicationId 'com.termux'; minSdkVersion 21 } }; dependencies { implementation project(':terminal-emulator'); implementation project(':terminal-view'); implementation project(':termux-shared'); implementation 'androidx.appcompat:appcompat:1.3.1'; implementation 'com.google.android.material:material:1.4.0' }" > app/build.gradle
-        echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33 }" > terminal-emulator/build.gradle
-        echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33 }; dependencies { implementation project(':terminal-emulator') }" > terminal-view/build.gradle
-        echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33 }; dependencies { implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'; implementation 'com.google.guava:guava:31.1-android' }" > termux-shared/build.gradle
+        echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33; defaultConfig { minSdkVersion 21 } }" > terminal-emulator/build.gradle
+        echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33; defaultConfig { minSdkVersion 21 } }; dependencies { implementation project(':terminal-emulator') }" > terminal-view/build.gradle
+        echo "apply plugin: 'com.android.library'; android { compileSdkVersion 33; defaultConfig { minSdkVersion 21 } }; dependencies { implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'; implementation 'com.google.guava:guava:31.1-android' }" > termux-shared/build.gradle
+
+        # 5. 清单修复 (确保有基础的 Manifest)
+        for mod in aide-termux app terminal-emulator terminal-view termux-shared; do
+          if [ ! -f "$mod/src/main/AndroidManifest.xml" ]; then
+            pkg=$(echo "com.termux.$mod" | sed 's/-//g')
+            echo "<manifest package='$pkg'/>" > "$mod/src/main/AndroidManifest.xml"
+          fi
+        done
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
@@ -74,12 +77,24 @@ jobs:
 
     - name: Build with Gradle
       run: |
-        # 此时环境变量中是 JDK 11
-        gradle assembleDebug --no-daemon --stacktrace -x lint
+        # 捕获日志
+        gradle assembleDebug --no-daemon --stacktrace -x lint 2>&1 | tee build_log.txt || touch build_failed
+
+    - name: Post-Build Diagnosis
+      if: always()
+      run: |
+        if [ -f build_failed ]; then
+          echo "### :x: 编译阶段失败" >> $GITHUB_STEP_SUMMARY
+          echo "#### 可能的错误根源 (Top Errors):" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          grep -E "error:|FAILED|Exception" build_log.txt | head -n 20 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
 
     - name: Upload APK
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Final
+        name: AIDE-Termux-Package
         path: "**/build/outputs/apk/**/*.apk"
