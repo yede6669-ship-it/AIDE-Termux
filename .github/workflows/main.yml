@@ -1,4 +1,4 @@
-name: Android CI (Breaking the Circle)
+name: Android CI (Duplicate Resource Fix)
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
       env:
         JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
 
-    - name: Heavy Duty Project Restructure
+    - name: Deep Project Cleaning & Merging
       run: |
         # 1. 模块归位
         for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
@@ -35,13 +35,22 @@ jobs:
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 暴力修复源码中的第三方库引用
+        # 2. 暴力修复源码与冲突资源
+        # 替换第三方 Log
         find . -name "*.java" -exec sed -i 's/io.github.zeroaicy.util.Log/android.util.Log/g' {} +
+        
+        # 【关键】解决资源冲突：如果 app 中已存在，则删除子模块中的同名资源
+        # 我们重点检查 drawable 和 layout 文件夹
+        find termux-shared/src/main/res/ -type f | while read file; do
+            filename=$(basename "$file")
+            # 如果在 app 模块的相同路径下找到了同名文件，就删除 shared 里的
+            find app/src/main/res/ -name "$filename" -exec rm -f "$file" \;
+        done
 
-        # 3. 重新定义 settings.gradle (暂时移除独立模块，准备合并)
+        # 3. 重新定义 settings.gradle
         echo "include ':app', ':terminal-emulator'" > settings.gradle
 
-        # 4. 配置根目录 build.gradle (升级 AGP)
+        # 4. 配置根目录 build.gradle
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
@@ -63,8 +72,7 @@ jobs:
         dependencies { implementation 'androidx.annotation:annotation:1.7.0' }
         EOF
 
-        # 6. 【核心黑科技】重写 app 模块，合并所有冲突模块的源码路径
-        # 这样做可以让编译器把它们当成一个整体，从而解决循环依赖
+        # 6. 配置 app 模块 (合并源码路径)
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -76,10 +84,8 @@ jobs:
                 targetSdk 34
                 ndk { abiFilters 'arm64-v8a' }
             }
-            
             sourceSets {
                 main {
-                    // 合并所有子模块的源码和资源到 app 模块中
                     java.srcDirs = [
                         'src/main/java', 
                         '../termux-shared/src/main/java', 
@@ -93,6 +99,9 @@ jobs:
                     manifest.srcFile 'src/main/AndroidManifest.xml'
                     jniLibs.srcDirs = ['src/main/jniLibs']
                 }
+            }
+            packagingOptions {
+                pickFirst '**/libc++_shared.so'
             }
         }
         dependencies {
@@ -116,5 +125,4 @@ jobs:
 
     - name: Build APK
       run: |
-        # 编译 app 模块
         gradle :app:assembleDebug --no-daemon -x lint
