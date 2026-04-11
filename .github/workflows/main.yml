@@ -1,4 +1,4 @@
-name: Android CI (Total Structure Alignment)
+name: Android CI (Atomic Fix)
 
 on:
   push:
@@ -18,35 +18,39 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up SDK & NDK
+    - name: Set up JDK & SDK
       uses: android-actions/setup-android@v3
 
-    - name: Install Components
+    - name: Install Build Tools
       run: |
         $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "platforms;android-33" "build-tools;30.0.3"
 
-    - name: Switch to JDK 11
+    - name: Use JDK 11
       uses: actions/setup-java@v4
       with:
         java-version: '11'
         distribution: 'temurin'
         cache: gradle
 
-    - name: Force Inject Gradle Wrapper
+    - name: Clean & Wrapper
       run: |
+        # 物理清理所有残留缓存
+        find . -name "build" -type d -exec rm -rf {} +
+        find . -name ".gradle" -type d -exec rm -rf {} +
+        
         mkdir -p gradle/wrapper
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
         printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-6.7.1-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Advanced Project Repair
+    - name: Atomic Project Reconstruction
       run: |
-        # 1. 生成 settings.gradle
+        # 1. 重建 settings.gradle，排除自身
         MODULES=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|'\:\1'|" | paste -sd "," - | sed 's/,/, /g')
         echo "include $MODULES" > settings.gradle
 
-        # 2. 生成根目录 build.gradle
+        # 2. 重建根目录 build.gradle
         cat << 'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -57,69 +61,70 @@ jobs:
         }
         EOF
 
-        # 3. 结构自愈与 Manifest 修复
-        echo "🚀 开始修复模块结构..."
+        # 3. 逐个模块精准手术
+        echo "🚀 执行原子级模块重建..."
         find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | while read -r file; do
           MOD_DIR=$(dirname "$file")
+          
+          # 创建标准目录
           mkdir -p "$MOD_DIR/src/main"
           
-          # 移动 Manifest
-          REAL_MANIFEST=$(find "$MOD_DIR" -name "AndroidManifest.xml" | head -n 1)
+          # 寻找 Manifest，排除 build 目录
+          REAL_MANIFEST=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
           if [ -n "$REAL_MANIFEST" ] && [ "$REAL_MANIFEST" != "$MOD_DIR/src/main/AndroidManifest.xml" ]; then
-             mv "$REAL_MANIFEST" "$MOD_DIR/src/main/AndroidManifest.xml"
+             cp "$REAL_MANIFEST" "$MOD_DIR/src/main/AndroidManifest.xml"
           fi
 
-          # 物理注入 Package
-          MANIFEST_PATH="$MOD_DIR/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST_PATH" ]; then
-            sed -i 's/\${applicationId}/com.termux/g' "$MANIFEST_PATH"
-            if ! grep -q "package=" "$MANIFEST_PATH"; then
-              sed -i 's/<manifest/<manifest package="com.termux"/g' "$MANIFEST_PATH"
-            fi
+          # 注入 Manifest 信息
+          MPATH="$MOD_DIR/src/main/AndroidManifest.xml"
+          if [ ! -f "$MPATH" ]; then
+            echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux" />' > "$MPATH"
           else
-            echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.termux" />' > "$MANIFEST_PATH"
+            sed -i 's/\${applicationId}/com.termux/g' "$MPATH"
+            if ! grep -q "package=" "$MPATH"; then
+              sed -i 's/<manifest/<manifest package="com.termux"/g' "$MPATH"
+            fi
           fi
 
-          # 4. 强力重写子模块 build.gradle
+          # 4. 生成洁净的 build.gradle
           PKG_NAME="com.termux"
           PLUGIN="com.android.library"
           if [[ "$MOD_DIR" == *"app"* ]]; then PLUGIN="com.android.application"; fi
           
-          # 使用变量替换构建临时文件
-          echo "apply plugin: '$PLUGIN'" > "${file}.tmp"
-          echo "android {" >> "${file}.tmp"
-          echo "    compileSdkVersion 33" >> "${file}.tmp"
-          echo "    buildToolsVersion '30.0.3'" >> "${file}.tmp"
-          echo "    defaultConfig {" >> "${file}.tmp"
-          if [[ "$PLUGIN" == "com.android.application" ]]; then
-              echo "        applicationId '$PKG_NAME'" >> "${file}.tmp"
-          fi
-          echo "        minSdkVersion 21" >> "${file}.tmp"
-          echo "        targetSdkVersion 33" >> "${file}.tmp"
-          echo "        versionCode 1" >> "${file}.tmp"
-          echo "        versionName '1.0'" >> "${file}.tmp"
-          echo "        manifestPlaceholders = [applicationId: '$PKG_NAME']" >> "${file}.tmp"
-          echo "    }" >> "${file}.tmp"
-          echo "    aaptOptions { namespaced = false }" >> "${file}.tmp"
-          echo "    lintOptions { abortOnError false }" >> "${file}.tmp"
-          echo "}" >> "${file}.tmp"
-
-          # 恢复依赖
+          cat <<EOF > "${file}.tmp"
+        apply plugin: '$PLUGIN'
+        android {
+            compileSdkVersion 33
+            buildToolsVersion '30.0.3'
+            defaultConfig {
+                if ('$PLUGIN' == 'com.android.application') { applicationId '$PKG_NAME' }
+                minSdkVersion 21
+                targetSdkVersion 33
+                versionCode 1
+                versionName '1.0'
+                manifestPlaceholders = [applicationId: '$PKG_NAME']
+            }
+            aaptOptions { namespaced = false }
+            lintOptions { abortOnError false }
+        }
+        dependencies {
+            implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
+EOF
+          # 尝试追加原有的外部库依赖，但跳过 project() 依赖以防循环引用
           if grep -q "dependencies {" "$file"; then
-            sed -n '/dependencies {/,$p' "$file" >> "${file}.tmp"
-          else
-            echo "dependencies { implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar']) }" >> "${file}.tmp"
+             grep "implementation" "$file" | grep -v "project(" >> "${file}.tmp" || true
           fi
+          echo "}" >> "${file}.tmp"
           mv "${file}.tmp" "$file"
         done
 
-    - name: Build All Modules
-      run: ./gradlew assembleDebug -x lint --stacktrace --no-daemon
+    - name: Build Debug APK
+      run: ./gradlew assembleDebug --no-daemon --stacktrace
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Fixed
+        name: AIDE-Termux-Atomic-Build
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
