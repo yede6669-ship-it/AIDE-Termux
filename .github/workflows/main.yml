@@ -1,4 +1,4 @@
-name: Android CI (Full Build & Artifact)
+name: Android CI (AIDE-Termux Fix)
 
 on:
   push:
@@ -25,32 +25,32 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Project Surgery & Dependency Injection
+    - name: Match Package Name & Fix Code
       run: |
-        # 1. 模块结构归一化
-        # 寻找分布在子目录中的模块并移动到根目录，确保路径一致
+        # 1. 模块归位
         for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
           P=$(find . -maxdepth 3 -name "$m" -type d | head -n 1)
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 源码级修复 (解决合并模块后的引用问题)
-        # 修复 R 类引用：所有模块资源现在都在主包 com.termux 下
+        # 2. 核心：强制修改 Manifest 中的包名为 com.aide.termux
+        # 这一步是为了让 AIDE+ 能够通过包名查找到主 Activity
+        find . -name "AndroidManifest.xml" -exec sed -i 's/package="com.termux"/package="com.aide.termux"/g' {} +
+        find . -name "AndroidManifest.xml" -exec sed -i 's/package="com.termux.terminal"/package="com.aide.termux.terminal"/g' {} +
+
+        # 3. 修复代码中的资源和 BuildConfig 引用
         find . -name "*.java" -exec sed -i 's/import com.termux.shared.R;/import com.termux.R;/g' {} +
         find . -name "*.java" -exec sed -i 's/import com.termux.view.R;/import com.termux.R;/g' {} +
         find . -name "*.java" -exec sed -i 's/com.termux.shared.R./com.termux.R./g' {} +
         find . -name "*.java" -exec sed -i 's/com.termux.view.R./com.termux.R./g' {} +
-        
-        # 修复 BuildConfig 引用
         find . -name "*.java" -exec sed -i 's/import com.termux.app.BuildConfig;/import com.termux.BuildConfig;/g' {} +
         find . -name "*.java" -exec sed -i 's/import com.termux.shared.BuildConfig;/import com.termux.BuildConfig;/g' {} +
         
-        # 修复 Log 兼容性：将自定义 Log 替换为系统 Log，并补全单参数 Log.d 的 TAG
+        # 4. 修复 Log 兼容性
         find . -name "*.java" -exec sed -i 's/io.github.zeroaicy.util.Log/android.util.Log/g' {} +
         find . -name "*.java" -exec sed -i 's/Log.d("/Log.d("Termux", "/g' {} +
 
-        # 3. 资源去重
-        # 防止 termux-shared 和 app 模块中存在同名非 values 资源导致合并冲突
+        # 5. 资源去重
         find termux-shared/src/main/res/ -type f | while read file; do
             filename=$(basename "$file")
             dirname=$(basename $(dirname "$file"))
@@ -59,7 +59,7 @@ jobs:
             fi
         done
 
-        # 4. 生成根目录构建脚本
+        # 6. 生成基础构建脚本
         echo "include ':app', ':terminal-emulator'" > settings.gradle
         cat <<'EOF' > build.gradle
         buildscript {
@@ -71,7 +71,7 @@ jobs:
         }
         EOF
 
-        # 5. 配置 terminal-emulator 模块
+        # 7. 配置 terminal-emulator
         cat <<'EOF' > terminal-emulator/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -82,14 +82,14 @@ jobs:
         dependencies { implementation 'androidx.annotation:annotation:1.7.0' }
         EOF
 
-        # 6. 配置主 App 模块 (包含所有源码集合和依赖补全)
+        # 8. 配置主 App (应用包名设为 com.aide.termux)
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
             compileSdk 34
             namespace "com.termux"
             defaultConfig {
-                applicationId "com.termux"
+                applicationId "com.aide.termux"  // 关键：对齐 AIDE+ 的调用
                 minSdk 21
                 targetSdk 34
                 versionCode 1
@@ -104,43 +104,29 @@ jobs:
                     java.srcDirs = ['src/main/java', '../termux-shared/src/main/java', '../terminal-view/src/main/java']
                     res.srcDirs = ['src/main/res', '../termux-shared/src/main/res', '../terminal-view/src/main/res']
                     manifest.srcFile 'src/main/AndroidManifest.xml'
-                    jniLibs.srcDirs = ['src/main/jniLibs']
                 }
-            }
-            packagingOptions {
-                pickFirst '**/libc++_shared.so'
             }
         }
         dependencies {
             implementation project(':terminal-emulator')
-            
-            // AndroidX 核心与 UI
             implementation 'androidx.appcompat:appcompat:1.6.1'
             implementation 'com.google.android.material:material:1.11.0'
             implementation 'androidx.preference:preference:1.2.1'
             implementation 'androidx.window:window:1.2.0'
-            
-            // 关键 Google 库
             implementation 'com.google.guava:guava:33.0.0-android'
             implementation 'com.google.code.findbugs:jsr305:3.0.2'
-            
-            // Termux 专用与第三方工具
             implementation 'commons-io:commons-io:2.15.1'
             implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'
             implementation 'com.termux:termux-am-library:v2.0.0'
-            
-            // Markdown 渲染 (Markwon)
             implementation 'io.noties.markwon:core:4.6.2'
             implementation 'io.noties.markwon:ext-strikethrough:4.6.2'
             implementation 'io.noties.markwon:linkify:4.6.2'
             implementation 'io.noties.markwon:recycler:4.6.2'
             implementation 'com.atlassian.commonmark:commonmark:0.17.0'
-            
             implementation 'androidx.annotation:annotation:1.7.0'
         }
         EOF
 
-        # 7. 基础环境配置
         echo "android.useAndroidX=true" > gradle.properties
         echo "android.enableJetifier=true" >> gradle.properties
         echo "android.nonTransitiveRClass=false" >> gradle.properties
@@ -154,8 +140,8 @@ jobs:
       run: |
         gradle :app:assembleDebug --no-daemon -x lint
 
-    - name: Upload APK Artifact
+    - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-AIDE-Build
+        name: AIDE-Termux-Fixed
         path: app/build/outputs/apk/debug/app-debug.apk
