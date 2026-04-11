@@ -1,4 +1,4 @@
-name: Android CI (Settings Fix)
+name: Android CI (Atomic Reconstruction v3)
 
 on:
   push:
@@ -40,21 +40,26 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Atomic Reconstruction
+    - name: Atomic Reconstruction & Debug
       run: |
-        # 1. 获取所有子模块目录名
-        MODULE_LIST=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|\1|")
+        # 1. 查找所有有效的子模块（排除根目录和构建目录）
+        MODULE_LIST=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" -not -path "*/build/*" | sed "s|\./\(.*\)/build\.gradle|\1|")
         
-        # 2. 生成 settings.gradle (每一行一个 include，确保语法绝对正确)
-        rm -f settings.gradle
+        # 2. 生成 settings.gradle - 使用最稳妥的单引号包裹
+        echo "// Auto-generated settings.gradle" > settings.gradle
         for MOD in $MODULE_LIST; do
-          echo "include(\":$MOD\")" >> settings.gradle
+          echo "include ':$MOD'" >> settings.gradle
         done
 
         # 3. 生成根目录 build.gradle
         printf "buildscript {\n    repositories { google(); mavenCentral() }\n    dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }\n}\nallprojects {\n    repositories { google(); mavenCentral() }\n}\n" > build.gradle
 
-        # 4. 遍历处理每个模块
+        # 4. 调试：打印生成的配置文件，方便在 Actions 日志中确认
+        echo "=== DEBUG: settings.gradle ==="
+        cat settings.gradle
+        echo "=============================="
+
+        # 5. 遍历处理每个模块
         for MOD_NAME in $MODULE_LIST; do
           MOD_DIR="./$MOD_NAME"
           TARGET_M_DIR="$MOD_DIR/src/main"
@@ -70,31 +75,31 @@ jobs:
           # 强制包名对齐 (文件夹名中的 - 替换为 _)
           SAFE_PKG="com.termux.${MOD_NAME//-/_}"
           if [ ! -f "$TARGET_M_PATH" ]; then
-            echo "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"$SAFE_PKG\" />" > "$TARGET_M_PATH"
+            printf '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="%s" />\n' "$SAFE_PKG" > "$TARGET_M_PATH"
           else
             sed -i "s/\${applicationId}/com.termux/g" "$TARGET_M_PATH"
-            if grep -q "package=" "$TARGET_M_PATH"; then
-               sed -i "s/package=\"[^\"]*\"/package=\"$SAFE_PKG\"/" "$TARGET_M_PATH"
-            else
-               sed -i "s/<manifest/<manifest package=\"$SAFE_PKG\"/" "$TARGET_M_PATH"
+            # 使用简单的字符串替换 package 属性
+            sed -i "s/package=\"[^\"]*\"/package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
+            if ! grep -q "package=" "$TARGET_M_PATH"; then
+               sed -i "s/<manifest/<manifest package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
             fi
           fi
 
-          # 5. 生成标准闭合的 build.gradle
+          # 6. 生成子模块 build.gradle
           BFILE="$MOD_DIR/build.gradle"
           PLUGIN="com.android.library"
           [[ "$MOD_NAME" == "app" ]] && PLUGIN="com.android.application"
           
-          printf "apply plugin: '$PLUGIN'\n\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n\n    defaultConfig {\n" > "$BFILE"
+          printf "apply plugin: '%s'\n\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n\n    defaultConfig {\n" "$PLUGIN" > "$BFILE"
           [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "$BFILE"
           printf "        minSdkVersion 21\n        targetSdkVersion 33\n        versionCode 1\n        versionName '1.0'\n        manifestPlaceholders = [applicationId: 'com.termux']\n    }\n" >> "$BFILE"
           printf "    lintOptions { abortOnError false }\n    packagingOptions { pickFirst 'lib/*/libtermux.so'; pickFirst '**/libc++_shared.so' }\n}\n\n" >> "$BFILE"
           
-          # 6. 生成依赖块
+          # 7. 模块依赖自动链接
           printf "dependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "$BFILE"
           if [[ "$MOD_NAME" == "app" ]]; then
               for OTHER_MOD in $MODULE_LIST; do
-                  [[ "$OTHER_MOD" != "app" ]] && printf "    implementation project(':$OTHER_MOD')\n" >> "$BFILE"
+                  [[ "$OTHER_MOD" != "app" ]] && printf "    implementation project(':%s')\n" "$OTHER_MOD" >> "$BFILE"
               done
           fi
           printf "}\n" >> "$BFILE"
@@ -106,7 +111,7 @@ jobs:
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Build-Fixed
+        name: Termux-Build-Atomic
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
