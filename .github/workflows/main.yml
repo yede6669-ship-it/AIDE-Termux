@@ -1,4 +1,4 @@
-name: Android CI (Final Precise Build)
+name: Android CI (Final Fixed Syntax)
 
 on:
   push:
@@ -24,21 +24,20 @@ jobs:
 
     - name: Reconstruction Project Structure
       run: |
-        # 1. 强力清除旧结构，防止干扰
+        # 清理环境
         rm -rf aide-termux app terminal-emulator terminal-view termux-shared settings.gradle build.gradle
         
-        # 2. 创建干净的模块目录
+        # 创建目录
         mkdir -p aide-termux/src/main app/src/main terminal-emulator/src/main terminal-view/src/main termux-shared/src/main
 
-        # 3. 物理移动清单文件 (不再使用 find，直接指定文件名)
-        # 如果你的仓库根目录文件名不同，请根据实际修改
+        # 映射清单文件
         cp "AndroidManifest.xml"     "aide-termux/src/main/AndroidManifest.xml" || touch "aide-termux/src/main/AndroidManifest.xml"
         cp "AndroidManifest (1).xml" "app/src/main/AndroidManifest.xml" || touch "app/src/main/AndroidManifest.xml"
         cp "AndroidManifest (2).xml" "terminal-emulator/src/main/AndroidManifest.xml" || touch "terminal-emulator/src/main/AndroidManifest.xml"
         cp "AndroidManifest (3).xml" "terminal-view/src/main/AndroidManifest.xml" || touch "terminal-view/src/main/AndroidManifest.xml"
         cp "AndroidManifest (4).xml" "termux-shared/src/main/AndroidManifest.xml" || touch "termux-shared/src/main/AndroidManifest.xml"
 
-        # 4. 生成绝对标准的根配置
+        # 生成根 build.gradle
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -51,21 +50,28 @@ jobs:
 
         echo "include ':aide-termux', ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
 
-        # 5. 定义模块生成函数 (使用严格的 EOF 防止变量转义)
-        generate_gradle() {
-          local mod=$1; local pkg=$2; local is_app=$3
-          local plugin="com.android.library"
-          [[ "$is_app" == "true" ]] && plugin="com.android.application"
+        # 核心修复：简化模块生成逻辑，避开第 88 行的语法冲突
+        generate_mod() {
+          local mod=$1; local pkg=$2; local type=$3
+          local b_path="$mod/build.gradle"
           
-          cat <<EOF > "$mod/build.gradle"
-          apply plugin: '$plugin'
+          # 先写入通用头部
+          cat <<EOF > "$b_path"
+          apply plugin: '$type'
           android {
               compileSdkVersion 33
               buildToolsVersion "30.0.3"
               defaultConfig {
                   minSdkVersion 21
                   targetSdkVersion 33
-                  $( [[ "$is_app" == "true" ]] && echo "applicationId '$pkg'" )
+EOF
+          # 如果是 application，注入 applicationId
+          if [ "$type" == "com.android.application" ]; then
+            echo "                applicationId '$pkg'" >> "$b_path"
+          fi
+
+          # 写入尾部依赖逻辑
+          cat <<EOF >> "$b_path"
               }
               sourceSets { main { 
                   manifest.srcFile 'src/main/AndroidManifest.xml'
@@ -88,14 +94,14 @@ jobs:
 EOF
         }
 
-        # 执行生成
-        generate_gradle "aide-termux" "com.aide.termux" "true"
-        generate_gradle "app" "com.termux" "true"
-        generate_gradle "terminal-emulator" "com.termux.terminal" "false"
-        generate_gradle "terminal-view" "com.termux.view" "false"
-        generate_gradle "termux-shared" "com.termux.shared" "false"
+        # 调用生成 (aide-termux 和 app 是 application，其余是 library)
+        generate_mod "aide-termux" "com.aide.termux" "com.android.application"
+        generate_mod "app" "com.termux" "com.android.application"
+        generate_mod "terminal-emulator" "com.termux.terminal" "com.android.library"
+        generate_mod "terminal-view" "com.termux.view" "com.android.library"
+        generate_mod "termux-shared" "com.termux.shared" "com.android.library"
 
-        # 6. 统一修正清单中的包名冲突
+        # 修正清单占位符
         find . -name "AndroidManifest.xml" -exec sed -i 's/\${applicationId}/com.termux/g' {} +
 
     - name: Download Compatible Gradle
@@ -111,5 +117,5 @@ EOF
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Final
+        name: AIDE-Termux-Package
         path: "**/build/outputs/apk/**/*.apk"
