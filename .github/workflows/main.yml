@@ -1,4 +1,4 @@
-name: Android CI (Atomic Reconstruction v4)
+name: Android CI (Extreme Cleanup)
 
 on:
   push:
@@ -7,8 +7,12 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # 增加 JVM 内存配额，解决快照阶段的超时隐患
-  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -Dorg.gradle.vfs.watch=false"
+  # 强制关闭所有增量功能，只求编译成功
+  GRADLE_OPTS: >-
+    -Dorg.gradle.jvmargs=-Xmx2048m 
+    -Dorg.gradle.vfs.watch=false 
+    -Dorg.gradle.daemon=false 
+    -Dorg.gradle.configureondemand=false
 
 jobs:
   build:
@@ -32,11 +36,17 @@ jobs:
       with:
         java-version: '11'
         distribution: 'temurin'
-        # 暂时关闭缓存，防止快照报错
-        cache: '' 
 
-    - name: Force Wrapper
+    - name: Nuclear Cleanup (AIDE & Gradle)
       run: |
+        # 物理删除所有可能干扰 Gradle 快照的非源码文件夹
+        find . -name "build" -type d -exec rm -rf {} +
+        find . -name ".gradle" -type d -exec rm -rf {} +
+        find . -name ".aide" -type d -exec rm -rf {} +
+        find . -name "gen" -type d -exec rm -rf {} +
+        find . -name "bin" -type d -exec rm -rf {} +
+        
+        # 重新初始化 Wrapper
         mkdir -p gradle/wrapper
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
         printf "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\://services.gradle.org/distributions/gradle-6.7.1-all.zip\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n" > gradle/wrapper/gradle-wrapper.properties
@@ -45,55 +55,45 @@ jobs:
 
     - name: Atomic Reconstruction
       run: |
-        # 1. 识别有效模块（过滤 build 文件夹）
-        MODULE_LIST=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" -not -path "*/build/*" | sed "s|\./\(.*\)/build\.gradle|\1|")
+        # 识别模块
+        MODULE_LIST=$(find . -maxdepth 2 -name "build.gradle" -not -path "./build.gradle" | sed "s|\./\(.*\)/build\.gradle|\1|")
         
-        # 2. 生成 settings.gradle
-        echo "// Build Fix" > settings.gradle
+        # 生成配置
+        echo "// Forced Clean Settings" > settings.gradle
         for MOD in $MODULE_LIST; do
           echo "include ':$MOD'" >> settings.gradle
         done
 
-        # 3. 根 build.gradle
         printf "buildscript {\n    repositories { google(); mavenCentral() }\n    dependencies { classpath 'com.android.tools.build:gradle:4.1.0' }\n}\nallprojects {\n    repositories { google(); mavenCentral() }\n}\n" > build.gradle
 
-        # 4. 模块重构
         for MOD_NAME in $MODULE_LIST; do
           MOD_DIR="./$MOD_NAME"
           TARGET_M_DIR="$MOD_DIR/src/main"
           TARGET_M_PATH="$TARGET_M_DIR/AndroidManifest.xml"
           mkdir -p "$TARGET_M_DIR"
           
-          # 物理移动 Manifest
-          REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/build/*" | head -n 1)
-          if [ -n "$REAL_M" ] && [ "$(realpath "$REAL_M")" != "$(realpath "$TARGET_M_PATH" 2>/dev/null)" ]; then
+          # 移动 Manifest
+          REAL_M=$(find "$MOD_DIR" -name "AndroidManifest.xml" -not -path "*/src/main/*" -not -path "*/build/*" | head -n 1)
+          if [ -n "$REAL_M" ]; then
              cp "$REAL_M" "$TARGET_M_PATH"
           fi
 
-          # 包名统一
+          # 强制对齐包名
           SAFE_PKG="com.termux.${MOD_NAME//-/_}"
           if [ ! -f "$TARGET_M_PATH" ]; then
             printf '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="%s" />\n' "$SAFE_PKG" > "$TARGET_M_PATH"
           else
-            sed -i "s/\${applicationId}/com.termux/g" "$TARGET_M_PATH"
             sed -i "s/package=\"[^\"]*\"/package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
-            if ! grep -q "package=" "$TARGET_M_PATH"; then
-               sed -i "s/<manifest/<manifest package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
-            fi
+            grep -q "package=" "$TARGET_M_PATH" || sed -i "s/<manifest/<manifest package=\"$SAFE_PKG\"/g" "$TARGET_M_PATH"
           fi
 
-          # 5. 生成 build.gradle
+          # 生成 build.gradle
           BFILE="$MOD_DIR/build.gradle"
-          PLUGIN="com.android.library"
-          [[ "$MOD_NAME" == "app" ]] && PLUGIN="com.android.application"
+          PLUGIN="com.android.library"; [[ "$MOD_NAME" == "app" ]] && PLUGIN="com.android.application"
           
-          printf "apply plugin: '%s'\n\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n" "$PLUGIN" > "$BFILE"
+          printf "apply plugin: '%s'\nandroid {\n    compileSdkVersion 33\n    buildToolsVersion '30.0.3'\n    defaultConfig {\n" "$PLUGIN" > "$BFILE"
           [[ "$PLUGIN" == "com.android.application" ]] && printf "        applicationId 'com.termux'\n" >> "$BFILE"
-          printf "        minSdkVersion 21\n        targetSdkVersion 33\n        versionCode 1\n        versionName '1.0'\n        manifestPlaceholders = [applicationId: 'com.termux']\n    }\n" >> "$BFILE"
-          printf "    lintOptions { abortOnError false }\n    packagingOptions { pickFirst 'lib/*/libtermux.so'; pickFirst '**/libc++_shared.so' }\n}\n\n" >> "$BFILE"
-          
-          # 依赖建立
-          printf "dependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "$BFILE"
+          printf "        minSdkVersion 21\n        targetSdkVersion 33\n    }\n    lintOptions { abortOnError false }\n}\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])\n" >> "$BFILE"
           if [[ "$MOD_NAME" == "app" ]]; then
               for OTHER_MOD in $MODULE_LIST; do
                   [[ "$OTHER_MOD" != "app" ]] && printf "    implementation project(':%s')\n" "$OTHER_MOD" >> "$BFILE"
@@ -102,14 +102,14 @@ jobs:
           printf "}\n" >> "$BFILE"
         done
 
-    - name: Build Clean APK
-      # 使用 --no-build-cache 和 --no-vfs-watch 强制跳过快照冲突
-      run: ./gradlew clean assembleDebug --no-daemon --no-build-cache --stacktrace
+    - name: Build Nuclear APK
+      # 使用 --no-daemon 和彻底关闭缓存，防止任何快照校验
+      run: ./gradlew assembleDebug --no-daemon --no-build-cache --no-scan --stacktrace
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Build-Stable
+        name: Termux-Nuclear-Build
         path: |
           **/build/outputs/apk/**/*.apk
           **/build/outputs/aar/**/*.aar
