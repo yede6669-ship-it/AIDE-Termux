@@ -1,4 +1,4 @@
-name: Android CI (AAPT2 Final Fix)
+name: Android CI (Final Dependency Recovery)
 
 on:
   push:
@@ -33,16 +33,15 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Project Reconstruction & Plugin Fix
+    - name: Project Infrastructure Reconstruction
       run: |
-        # 1. 自动归位模块
+        # 1. 模块归位
         for m in "terminal-emulator" "terminal-view" "termux-shared" "app"; do
           P=$(find . -maxdepth 3 -name "$m" -type d | head -n 1)
           [ -n "$P" ] && [ "$P" != "./$m" ] && mv "$P" "./$m" || true
         done
 
-        # 2. 暴力重写子模块的 build.gradle，确保它们是 Library 且 SDK 对齐
-        # 处理 terminal-emulator
+        # 2. 精确重写子模块 build.gradle (补全关键依赖)
         cat <<'EOF' > terminal-emulator/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -52,18 +51,6 @@ jobs:
         }
         EOF
 
-        # 处理 terminal-view
-        cat <<'EOF' > terminal-view/build.gradle
-        apply plugin: 'com.android.library'
-        android {
-            compileSdk 31
-            namespace "com.termux.view"
-            defaultConfig { minSdk 21 }
-        }
-        dependencies { implementation project(':terminal-emulator') }
-        EOF
-
-        # 处理 termux-shared
         cat <<'EOF' > termux-shared/build.gradle
         apply plugin: 'com.android.library'
         android {
@@ -71,9 +58,27 @@ jobs:
             namespace "com.termux.shared"
             defaultConfig { minSdk 21 }
         }
+        dependencies {
+            implementation 'androidx.appcompat:appcompat:1.3.1'
+            // 必须包含 termux-am 库
+            implementation 'com.termux:termux-am-library:v2.0.0'
+        }
         EOF
 
-        # 3. 根配置：加入 JitPack 并强制全局降级
+        cat <<'EOF' > terminal-view/build.gradle
+        apply plugin: 'com.android.library'
+        android {
+            compileSdk 31
+            namespace "com.termux.view"
+            defaultConfig { minSdk 21 }
+        }
+        dependencies {
+            implementation project(':terminal-emulator')
+            implementation project(':termux-shared')
+        }
+        EOF
+
+        # 3. 根目录全局配置
         cat <<'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }
@@ -91,18 +96,16 @@ jobs:
         }
         EOF
 
-        cat <<'EOF' > settings.gradle
-        include ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'
-        EOF
-
+        echo "include ':app', ':terminal-emulator', ':terminal-view', ':termux-shared'" > settings.gradle
+        
         cat <<'EOF' > gradle.properties
         android.useAndroidX=true
         android.enableJetifier=true
         android.suppressUnsupportedCompileSdk=31
-        android.nonTransitiveRClass=true
+        android.nonTransitiveRClass=false
         EOF
 
-        # 4. 重写主 app 模块配置
+        # 4. 重写主 App
         cat <<'EOF' > app/build.gradle
         apply plugin: 'com.android.application'
         android {
@@ -115,12 +118,6 @@ jobs:
                 ndk { abiFilters 'arm64-v8a' }
             }
             sourceSets { main { jniLibs.srcDirs = ['src/main/jniLibs'] } }
-            packagingOptions {
-                doNotStrip "**/libtermux-bootstrap.so"
-                doNotStrip "**/libproot.so"
-                doNotStrip "**/libLoader.so"
-                pickFirsts += '**/libc++_shared.so'
-            }
         }
         dependencies {
             implementation project(':terminal-emulator')
@@ -140,12 +137,12 @@ jobs:
       run: |
         export JAVA_HOME=$JAVA_HOME_11_X64
         export PATH=$JAVA_HOME/bin:$PATH
-        # 增加 --stacktrace 监控最后的链接步骤
-        gradle :app:assembleDebug --no-daemon --refresh-dependencies --stacktrace
+        # 使用 --info 捕获更详尽的失败原因，万一还没过，我们就知道差哪了
+        gradle :app:assembleDebug --no-daemon --refresh-dependencies --info
 
     - name: Upload
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Termux-Build-Final
+        name: Termux-Success-Final
         path: "app/build/outputs/apk/debug/*.apk"
