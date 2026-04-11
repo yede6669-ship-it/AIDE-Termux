@@ -47,28 +47,45 @@ jobs:
         curl -L https://raw.githubusercontent.com/gradle/gradle/v6.7.1/gradlew -o gradlew
         chmod +x gradlew
 
-    - name: Patch Build Scripts (Injecting Repositories)
+    - name: Patch Build Scripts (Structural Reconstruction)
       run: |
-        # 1. 强行在根目录 build.gradle 的最顶端注入 google() 仓库
-        # 这样可以确保 Gradle 在寻找插件时能看到 Google 仓库
-        sed -i "1i buildscript { repositories { google(); mavenCentral() } }" build.gradle
+        # 1. 修复根目录 build.gradle：确保 buildscript 块结构完整
+        cat <<EOF > build.gradle
+        buildscript {
+            repositories {
+                google()
+                mavenCentral()
+            }
+            dependencies {
+                classpath 'com.android.tools.build:gradle:4.1.0'
+            }
+        }
+        allprojects {
+            repositories {
+                google()
+                mavenCentral()
+            }
+        }
+        EOF
+
+        # 2. 修复 app/build.gradle：确保第一行就是 apply plugin
+        # 移除原文件中的 buildFeatures 和 jcenter 引用
+        sed -i 's/jcenter()/mavenCentral()/g' app/build.gradle
+        sed -i '/buildFeatures {/,/}/d' app/build.gradle
         
-        # 2. 全局替换 jcenter 为 mavenCentral
-        find . -name "*.gradle" -type f -exec sed -i 's/jcenter()/mavenCentral()/g' {} +
-        find . -name "*.gradle" -type f -exec sed -i "s/google()/google()/g" {} +
-        
-        # 3. 强制统一插件版本。如果原来的 classpath 匹配失败，直接在 buildscript 块里追加一个
-        # 注意：这里我们尝试匹配常见的 classpath 定义并替换
-        sed -i "s/classpath ['\"]com.android.tools.build:gradle:.*['\"]/classpath 'com.android.tools.build:gradle:4.1.0'/g" build.gradle || true
+        # 3. 预防 android() 找不到：确保文件开头声明了插件
+        if ! grep -q "com.android.application" app/build.gradle; then
+           sed -i '1i apply plugin: "com.android.application"' app/build.gradle
+        fi
 
     - name: Build with Gradle
+      # 添加 --no-daemon 确保内存不溢出
       run: ./gradlew assembleRelease --stacktrace --no-daemon
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: AIDE-Termux-Final-Build
+        name: AIDE-Termux-Package
         path: |
           **/build/outputs/apk/release/*.apk
           **/build/outputs/apk/*.apk
-          **/build/outputs/bundle/release/*.aab
